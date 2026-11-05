@@ -138,8 +138,10 @@ It is **not** applied by the installer; it patches Rosemary itself.
   `<install>/rosemary-patched/rosemary`. That path is either a symlink to the
   passed binary or a Nix result pointing at a build directory; if the passed
   path is already inside it, nothing is replaced (it is read-only in the store).
-  Later runs pick it up automatically. Without it, installation starts vanilla
-  Roblox.
+  Later runs pick it up automatically. `resolve_rosemary` normalises the
+  remembered path to the executable (`bin/rosemary` inside a build directory),
+  and the launchers always exec that file — never a directory. Without it,
+  installation starts vanilla Roblox.
 
 Rebase procedure: `git clone` Rosemary, `git apply` the patch, `nix build
 path:.` (or Cargo), run `rosemary --analyze` on `libOpiumware.dylib`, expect

@@ -460,6 +460,21 @@ download_rosemary() {
     }
 }
 
+# A Rosemary path may be an executable file, or a Nix result *directory* whose
+# executable is `bin/rosemary` (what `nix build -o .../rosemary-patched/rosemary`
+# leaves behind). Normalise it to the file, refusing a path that is neither, so
+# the launchers and every other call site always exec a file.
+rosemary_binary() {
+    local path="$1"
+    if [ -d "$path" ]; then
+        path="$path/bin/rosemary"
+    fi
+    if [ ! -f "$path" ] || [ ! -x "$path" ]; then
+        die "Rosemary executable not found: $path"
+    fi
+    printf '%s\n' "$path"
+}
+
 resolve_rosemary() {
     local installed="$INSTALL_DIR/rosemary-patched/rosemary"
 
@@ -481,13 +496,14 @@ resolve_rosemary() {
                 ROSEMARY="$installed"
                 ;;
         esac
+        ROSEMARY="$(rosemary_binary "$ROSEMARY")" || return 1
         ROSEMARY_PATCHED=1
         echo -e "${INFO} Using patched Rosemary at ${BOLD}$ROSEMARY${NC}"
         return
     fi
 
     if [ -x "$installed" ] && [ "$UPDATE_ROSEMARY" = 0 ]; then
-        ROSEMARY="$installed"
+        ROSEMARY="$(rosemary_binary "$installed")" || return 1
         ROSEMARY_PATCHED=1
         echo -e "${INFO} Using previously installed patched Rosemary${NC}"
         return
