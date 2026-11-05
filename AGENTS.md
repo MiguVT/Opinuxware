@@ -123,20 +123,25 @@ libmimalloc>`; Rosemary should mention imports coming from
 `@rpath/libOpiumware.dylib`. Note that `--analyze` resolves the command-line path
 on the host, while normal `run` resolves guest paths inside the prefix.
 
-## Rosemary source patch
+## Rosemary source patches
 
-`patches/rosemary-objc-classlist.patch` is a different thing and is **not**
-applied by the installer. It adds `objc_getClassList` and `objc_copyClassList`
-to Rosemary's `RUNTIME` loader table. Keep the distinction explicit in docs:
+`patches/rosemary-executor-apis.patch` is the one users need for the executor.
+It is **not** applied by the installer; it patches Rosemary itself.
 
-- Not needed for vanilla Roblox.
-- Needed to get past the executor's first crash, but not sufficient: the next
-  crash is `_SecPolicyCreateSSL` (SecureTransport), which Rosemary lacks.
-- Do not describe it as "makes Opiumware work"; it does not.
+- Vanilla Roblox does not need it.
+- The executor needs it: it resolves every import `libOpiumware.dylib` has.
+- `patches/rosemary-objc-classlist.patch` is the standalone
+  `objc_getClassList` fix, already contained in the main patch. Keep it only as
+  a minimal reproducer for upstream.
+- The installer treats any `--rosemary PATH` as patched, remembers it at
+  `<install>/rosemary-patched/rosemary`, and launches the executor from the
+  install. Without it, installation starts vanilla Roblox.
 
-When changing it, rebuild Rosemary with `nix build path:<checkout>` or Cargo and
-verify with `rosemary --analyze` that `_objc_getClassList` is no longer listed as
-unresolved.
+Rebase procedure: `git clone` Rosemary, `git apply` the patch, `nix build
+path:.` (or Cargo), run `rosemary --analyze` on `libOpiumware.dylib`, expect
+"0 imports unbound", then smoke-run `opinuxware-roblox` for 60 s and confirm no
+`nothing satisfied` faults. Do not commit Rust sources here; this repo only
+carries the `.patch`.
 
 ## Bash conventions and pitfalls
 
@@ -224,25 +229,41 @@ When bumping Rosemary, re-check the AppImage asset name
 ## Current compatibility state (as of 2026-11)
 
 Vanilla Roblox — `opinuxware-roblox-vanilla` running the pristine
-`RobloxVanilla.app` — works on Rosemary 0.5.0. That is the supported play path
-today.
+`RobloxVanilla.app` — works on stock Rosemary 0.5.0.
 
-With Opiumware the install and injection pipeline works, but the runtime stops
-inside `libOpiumware.dylib`:
+The executor (`opinuxware-roblox`, `Roblox.app` + `libOpiumware.dylib`) works
+when Rosemary is built with `patches/rosemary-executor-apis.patch`:
 
-1. `_objc_getClassList` was the first crash. Rosemary implements it, but never
-   adds it to the loader's `RUNTIME` table in
-   `crates/rosemary/src/objc/dispatch.rs`, so guest imports do not bind. This is
-   still true on `main` as of 2026-11-05. `patches/rosemary-objc-classlist.patch`
-   fixes it (verified: 29 unbound imports become 28, and the crash moves on).
-2. The next crash is `_SecPolicyCreateSSL` inside `libOpiumware.dylib`. The
-   dylib needs the SecureTransport `SSL*` stack, `SecTrust`/`SecPolicy`, and a
-   few Accessibility/CoreVideo/QuartzCore symbols. Rosemary has no
-   SecureTransport implementation, so the executor cannot finish its HTTPS
-   setup. This is a real feature gap in Rosemary, not something the installer
-   should stub around.
+- `libOpiumware.dylib` goes from 15 unresolved imports to **0**.
+- Verified: a 60-second run reaches Luau execution and Roblox's HTTP/WebSocket
+  servers with zero "import nothing satisfied" faults. Before the patch it
+  crashed within ~2 seconds.
 
-Do not "fix" this by stubbing certificate validation or the TLS stack in
-`install.sh`; that belongs in Rosemary and would be unsafe to fake. Keep the
-symptom list in README current, and upstream runtime fixes where possible.
+What the patch adds, roughly:
+
+1. `crates/security/src/securetransport.rs` — SecureTransport `SSL*` over
+   Rustls, with real chain + hostname verification, host callback pumping, and
+   `errSSLWouldBlock`. Never disables verification.
+2. `crates/security/src/trust.rs` — `SecPolicyCreateSSL`,
+   `SecTrustEvaluateWithError`, `SecTrustSetOCSPResponse`,
+   `SecTrustSetNetworkFetchAllowed`, `SecTrustSetAnchorCertificates` (refuses to
+   replace anchors), plus chain getters.
+3. `crates/rosemary/src/objc/dispatch.rs` — `objc_getClassList` /
+   `objc_copyClassList` loader entries (supersedes
+   `patches/rosemary-objc-classlist.patch`).
+4. CoreVideo Metal texture cache, `CATransaction`, Accessibility
+   (`AXIsProcessTrusted*`), `CFErrorCreate`, `CFUserNotificationDisplayAlert`,
+   `CGEventCreateScrollWheelEvent`/`SetLocation`/`SetDoubleValueField`,
+   `NSApplicationDidHide/UnhideNotification`, `NSImageName*`, `CGWindow*` keys,
+   `kCVMetalTextureUsage`, `___NSDictionary0__struct`.
+
+Still not run: the Opiumware UI. Its 33 remaining imports are `NSUserNotification*`,
+`NSAppleScript`, `SystemConfiguration` dynamic-store keys, `fclonefileat`,
+`__objc_personality_v0`, class-pair/ivar metadata calls, and a few SSL getters.
+That is the next gap, and it does not affect the executor.
+
+Do not "fix" executor gaps by stubbing certificate verification or the TLS
+stack. Keep the patch rebasable against Rosemary `main`, and drop it if upstream
+lands the same APIs. Re-check imports with
+`rosemary --analyze <host path to libOpiumware.dylib>`.
 

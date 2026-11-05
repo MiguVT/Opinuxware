@@ -89,6 +89,7 @@ UNINSTALL=0
 ASSUME_YES=0
 CUSTOM_ROSEMARY="${OPINUXWARE_ROSEMARY:-}"
 ROSEMARY=""
+ROSEMARY_PATCHED=0
 TEMP=""
 
 # ---------------------------------------------------------------------------
@@ -460,10 +461,31 @@ download_rosemary() {
 }
 
 resolve_rosemary() {
+    local installed="$INSTALL_DIR/rosemary-patched/rosemary"
+
+    if [ -d "$INSTALL_DIR/rosemary-patched" ] && [ ! -e "$installed" ]; then
+        warn "Ignoring $installed: the patched Rosemary it pointed at is gone."
+    fi
+
     if [ -n "$CUSTOM_ROSEMARY" ]; then
         [ -x "$CUSTOM_ROSEMARY" ] || die "Rosemary is not executable: $CUSTOM_ROSEMARY"
-        ROSEMARY="$CUSTOM_ROSEMARY"
-        echo -e "${INFO} Using Rosemary at ${BOLD}$ROSEMARY${NC}"
+        ROSEMARY="$(cd "$(dirname "$CUSTOM_ROSEMARY")" && pwd)/$(basename "$CUSTOM_ROSEMARY")"
+        # Keep the patched build at a stable path, so later re-runs and the
+        # launchers use it instead of the bundled stock release.
+        mkdir -p "$INSTALL_DIR/rosemary-patched" || return 1
+        if [ "$installed" != "$ROSEMARY" ]; then
+            ln -sf "$ROSEMARY" "$installed" || return 1
+            ROSEMARY="$installed"
+        fi
+        ROSEMARY_PATCHED=1
+        echo -e "${INFO} Using patched Rosemary at ${BOLD}$ROSEMARY${NC}"
+        return
+    fi
+
+    if [ -x "$installed" ] && [ "$UPDATE_ROSEMARY" = 0 ]; then
+        ROSEMARY="$installed"
+        ROSEMARY_PATCHED=1
+        echo -e "${INFO} Using previously installed patched Rosemary${NC}"
         return
     fi
 
@@ -741,10 +763,19 @@ launch_apps() {
         return 0
     fi
 
-    # The Opiumware library needs Security APIs Rosemary does not have yet, so
-    # the working first run is the pristine Roblox bundle.
-    warn "Opiumware's runtime is not available in Rosemary yet; starting vanilla Roblox."
-    echo -e "${INFO} Use ${BOLD}${BIN_DIR}/opinuxware-roblox${NC} to test the executor anyway."
+    # The executor needs API shims that stock Rosemary lacks; a build passed
+    # with --rosemary is assumed to have them. Otherwise vanilla is the only
+    # bundle that runs.
+    if [ "$ROSEMARY_PATCHED" = 1 ]; then
+        echo -e "${INFO} Starting Roblox with the Opiumware library..."
+        nohup "$BIN_DIR/opinuxware-roblox" >"$INSTALL_DIR/launch.log" 2>&1 &
+        disown || true
+        return 0
+    fi
+
+    warn "Stock Rosemary lacks the executor's Security APIs; starting vanilla Roblox."
+    echo -e "${INFO} Build a patched Rosemary (see README) and reinstall with:"
+    echo -e "         ${BOLD}./install.sh --rosemary /path/to/rosemary${NC}"
     nohup "$BIN_DIR/opinuxware-roblox-vanilla" >"$INSTALL_DIR/launch.log" 2>&1 &
     disown || true
     return 0

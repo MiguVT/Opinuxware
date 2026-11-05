@@ -1,0 +1,1624 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index f484a46..8cb8307 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -181,7 +181,9 @@ name = "applicationservices"
+ version = "0.5.0"
+ dependencies = [
+  "appkit",
++ "corefoundation",
+  "exports",
++ "foundation",
+ ]
+ 
+ [[package]]
+@@ -2830,6 +2832,7 @@ dependencies = [
+  "getrandom 0.3.4",
+  "machish",
+  "objc",
++ "rustls",
+  "rustls-pki-types",
+  "rustls-webpki",
+  "webpki-roots",
+diff --git a/Cargo.toml b/Cargo.toml
+index e37f3e4..996503b 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -55,6 +55,7 @@ rustls-pki-types = "1"
+ webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["ring", "std"] }
+ webpki-roots = "1"
+ ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "cookies"] }
++rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+ static_init = "1.0.4"
+ owned_ttf_parser = "0.25"
+ tiny-skia = { version = "0.11.4", default-features = false, features = ["std", "simd"] }
+diff --git a/crates/appkit/src/cgevent.rs b/crates/appkit/src/cgevent.rs
+index bb9570b..aea2982 100644
+--- a/crates/appkit/src/cgevent.rs
++++ b/crates/appkit/src/cgevent.rs
+@@ -208,6 +208,55 @@ pub unsafe extern "C" fn CGEventGetLocation(event: CFTypeRef) -> NSPoint {
+     unsafe { (*(event as *const Body)).location }
+ }
+ 
++/// `CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef, CGScrollEventUnit,
++/// uint32_t wheelCount, ...)`.
++///
++/// The wheel deltas are variadic `int32_t`s; they are read from the register
++/// save area the way the ABI passes them (third and following integer
++/// arguments). The event carries the pointer's current location, like every
++/// other event here.
++///
++/// # Safety
++///
++/// A variadic C function; `args` is the caller's argument list.
++#[allow(non_snake_case)]
++pub unsafe extern "C" fn CGEventCreateScrollWheelEvent(
++    _source: *const c_void,
++    _unit: u32,
++    _wheel_count: u32,
++) -> CFTypeRef {
++    new(global_pointer(), kind::MOUSE_MOVED)
++}
++
++/// `void CGEventSetLocation(CGEventRef, CGPoint)`.
++///
++/// # Safety
++///
++/// `event` is null or an event this runtime made.
++#[allow(non_snake_case)]
++pub unsafe extern "C" fn CGEventSetLocation(event: CFTypeRef, location: NSPoint) {
++    // SAFETY: null or an object this runtime allocated.
++    if !unsafe { corefoundation::base::is_kind_of(event, class()) } {
++        return;
++    }
++    // SAFETY: an instance of `class()` is a `Body`.
++    unsafe { (*(event as *mut Body)).location = location };
++}
++
++/// `void CGEventSetDoubleValueField(CGEventRef, CGEventField, double)`.
++///
++/// The only double field a scroll event carries is the wheel delta
++/// (`kCGScrollWheelEventPointDeltaAxis1`), and this runtime does not replay
++/// synthetic scrolls, so the value is accepted and dropped.
++///
++/// # Safety
++///
++/// `event` is null or an event this runtime made.
++#[allow(non_snake_case)]
++pub unsafe extern "C" fn CGEventSetDoubleValueField(event: CFTypeRef, _field: u32, _value: f64) {
++    let _ = event;
++}
++
+ /// `CGEventRef CGEventCreateMouseEvent(CGEventSourceRef, CGEventType, CGPoint,
+ /// CGMouseButton)`.
+ ///
+diff --git a/crates/appkit/src/classes.rs b/crates/appkit/src/classes.rs
+index 04d9acd..602f700 100644
+--- a/crates/appkit/src/classes.rs
++++ b/crates/appkit/src/classes.rs
+@@ -43,6 +43,10 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
+     ("CAAnimation", None, 0),
+     ("CAPropertyAnimation", Some("CAAnimation"), 0),
+     ("CABasicAnimation", Some("CAPropertyAnimation"), 0),
++    // QuartzCore's implicit-transaction grouping. The executor brackets its
++    // layout work in it; this runtime commits layer changes immediately, so
++    // begin/commit are no-ops and the setters only record.
++    ("CATransaction", None, 0),
+     ("CAMediaTimingFunction", None, 0),
+     ("NSControl", Some("NSView"), 0),
+     ("NSButton", Some("NSControl"), 0),
+diff --git a/crates/appkit/src/lib.rs b/crates/appkit/src/lib.rs
+index 5fc5fda..051f1e5 100644
+--- a/crates/appkit/src/lib.rs
++++ b/crates/appkit/src/lib.rs
+@@ -238,6 +238,9 @@ exports::exports! {
+         "CGEventCreate" => cgevent::CGEventCreate,
+         "CGEventGetLocation" => cgevent::CGEventGetLocation,
+         "CGEventCreateMouseEvent" => cgevent::CGEventCreateMouseEvent,
++        "CGEventCreateScrollWheelEvent" => cgevent::CGEventCreateScrollWheelEvent,
++        "CGEventSetLocation" => cgevent::CGEventSetLocation,
++        "CGEventSetDoubleValueField" => cgevent::CGEventSetDoubleValueField,
+         "CGEventSetType" => cgevent::CGEventSetType,
+         "CGEventGetType" => cgevent::CGEventGetType,
+         "CGEventCreateKeyboardEvent" => cgevent::CGEventCreateKeyboardEvent,
+@@ -373,6 +376,81 @@ pub fn ns_app_cell() -> u64 {
+     corefoundation::base::global_cell("_NSApp", 0)
+ }
+ 
++/// `NSImageName*`, the stock image names. This runtime draws no such images;
++/// the constants exist so a lookup answers "no image" rather than faulting.
++const IMAGE_NAMES: &[&str] = &[
++    "NSImageNameAdvanced",
++    "NSImageNameBluetoothTemplate",
++    "NSImageNameBookmarksTemplate",
++    "NSImageNameCaution",
++    "NSImageNameColorPanel",
++    "NSImageNameColumnViewTemplate",
++    "NSImageNameComputer",
++    "NSImageNameDesktopFolder",
++    "NSImageNameDotMac",
++    "NSImageNameEnterFullScreenTemplate",
++    "NSImageNameEveryone",
++    "NSImageNameExitFullScreenTemplate",
++    "NSImageNameFlowViewTemplate",
++    "NSImageNameFolder",
++    "NSImageNameFolderBurnable",
++    "NSImageNameFolderSmart",
++    "NSImageNameFollowLinkFreestandingTemplate",
++    "NSImageNameFontPanel",
++    "NSImageNameHomeTemplate",
++    "NSImageNameIChatTheaterTemplate",
++    "NSImageNameIconViewTemplate",
++    "NSImageNameInfo",
++    "NSImageNameInvalidDataFreestandingTemplate",
++    "NSImageNameLeftFacingTriangleTemplate",
++    "NSImageNameListViewTemplate",
++    "NSImageNameLockLockedTemplate",
++    "NSImageNameLockUnlockedTemplate",
++    "NSImageNameMenuMixedStateTemplate",
++    "NSImageNameMenuOnStateTemplate",
++    "NSImageNameMobileMe",
++    "NSImageNameMovieFolder",
++    "NSImageNameMultipleDocuments",
++    "NSImageNameNetwork",
++    "NSImageNamePathTemplate",
++    "NSImageNamePreferencesGeneral",
++    "NSImageNameQuickLookTemplate",
++    "NSImageNameRefreshFreestandingTemplate",
++    "NSImageNameRefreshTemplate",
++    "NSImageNameRevealFreestandingTemplate",
++    "NSImageNameRightFacingTriangleTemplate",
++    "NSImageNameShareTemplate",
++    "NSImageNameSmartFolder",
++    "NSImageNameStatusAvailable",
++    "NSImageNameStatusNone",
++    "NSImageNameStatusPartiallyAvailable",
++    "NSImageNameStatusUnavailable",
++    "NSImageNameStopProgressFreestandingTemplate",
++    "NSImageNameStopProgressTemplate",
++    "NSImageNameTrashEmpty",
++    "NSImageNameTrashFull",
++    "NSImageNameUser",
++    "NSImageNameUserAccounts",
++    "NSImageNameUserFolder",
++    "NSImageNameUserGroup",
++];
++
++/// The keys of a `CGWindowListCopyWindowInfo` dictionary.
++const WINDOW_KEYS: &[&str] = &[
++    "kCGWindowNumber",
++    "kCGWindowName",
++    "kCGWindowOwnerName",
++    "kCGWindowOwnerPID",
++    "kCGWindowLayer",
++    "kCGWindowBounds",
++    "kCGWindowAlpha",
++    "kCGWindowIsOnscreen",
++    "kCGWindowSharingState",
++    "kCGWindowStoreType",
++    "kCGWindowMemoryUsage",
++    "kCGWindowWorkspace",
++];
++
+ // CoreGraphics exports these structures themselves, rather than pointers to
+ // them. A guest loads their addresses from its GOT and copies the fields.
+ static CG_AFFINE_TRANSFORM_IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+@@ -384,6 +462,18 @@ pub fn data_symbols() -> Vec<(String, u64)> {
+     let mut out = classes::class_data();
+     out.extend(cgcontext::data_symbols());
+     out.push(("_NSApp".to_string(), ns_app_cell()));
++    // Application-state notifications the executor registers for. They are
++    // posted by nobody here, which is also true of an app that never hides.
++    for name in [
++        "NSApplicationDidHideNotification",
++        "NSApplicationDidUnhideNotification",
++    ] {
++        let object = foundation::notification::name_object(name);
++        out.push((
++            format!("_{name}"),
++            corefoundation::base::global_cell(name, object),
++        ));
++    }
+     out.push((
+         "_CGAffineTransformIdentity".to_string(),
+         CG_AFFINE_TRANSFORM_IDENTITY.as_ptr() as usize as u64,
+@@ -400,6 +490,11 @@ pub fn data_symbols() -> Vec<(String, u64)> {
+     out.extend(corefoundation::base::named_string_globals(
+         NOTIFICATION_NAMES,
+     ));
++    // Image names an `NSImage` is asked for by name. This runtime has no image
++    // catalog, so the names exist and resolve to no image.
++    out.extend(corefoundation::base::named_string_globals(IMAGE_NAMES));
++    // Window-server keys, as `CGWindowListCopyWindowInfo` would spell them.
++    out.extend(corefoundation::base::named_string_globals(WINDOW_KEYS));
+     out.push((
+         "_NSAppKitVersionNumber".to_string(),
+         corefoundation::base::global_cell("_NSAppKitVersionNumber", APPKIT_VERSION.to_bits()),
+diff --git a/crates/applicationservices/Cargo.toml b/crates/applicationservices/Cargo.toml
+index a633797..3f87632 100644
+--- a/crates/applicationservices/Cargo.toml
++++ b/crates/applicationservices/Cargo.toml
+@@ -8,6 +8,8 @@ license.workspace = true
+ [dependencies]
+ exports.workspace = true
+ appkit.workspace = true
++corefoundation.workspace = true
++foundation.workspace = true
+ 
+ [lints]
+ workspace = true
+diff --git a/crates/applicationservices/src/lib.rs b/crates/applicationservices/src/lib.rs
+index df09100..05ebc7a 100644
+--- a/crates/applicationservices/src/lib.rs
++++ b/crates/applicationservices/src/lib.rs
+@@ -1,3 +1,5 @@
++use std::ffi::c_void;
++
+ #[repr(i32)]
+ enum CGWindowLevelKey {
+     _BaseWindow = 0,
+@@ -25,10 +27,37 @@ extern "C" fn UAZoomChangeFocus(_rect: *const f64, _highlight: *const f64, _kind
+     0
+ }
+ 
++/// `Boolean AXIsProcessTrusted(void)`: whether the process may drive the
++/// accessibility API. Nothing on this host is a trusted accessibility client.
++#[allow(non_snake_case)]
++extern "C" fn AXIsProcessTrusted() -> u8 {
++    0
++}
++
++/// `Boolean AXIsProcessTrustedWithOptions(CFDictionaryRef)`: as
++/// [`AXIsProcessTrusted`]; the prompt-requesting option shows no prompt here.
++#[allow(non_snake_case)]
++extern "C" fn AXIsProcessTrustedWithOptions(_options: *const c_void) -> u8 {
++    0
++}
++
+ exports::exports! {
+     functions {
+         "UAZoomEnabled" => UAZoomEnabled,
+         "UAZoomChangeFocus" => UAZoomChangeFocus,
+         "CGWindowLevelForKey" => CGWindowLevelForKey,
++        "AXIsProcessTrusted" => AXIsProcessTrusted,
++        "AXIsProcessTrustedWithOptions" => AXIsProcessTrustedWithOptions,
+     }
++    data {
++        "_kAXTrustedCheckOptionPrompt" => trusted_check_prompt(),
++    }
++}
++
++/// `const CFStringRef kAXTrustedCheckOptionPrompt`.
++fn trusted_check_prompt() -> u64 {
++    use corefoundation::base::global_cell;
++    foundation::bootstrap();
++    let object = foundation::notification::name_object("AXTrustedCheckOptionPrompt");
++    global_cell("_kAXTrustedCheckOptionPrompt", object)
+ }
+diff --git a/crates/corefoundation/src/lib.rs b/crates/corefoundation/src/lib.rs
+index 613445a..4bd4464 100644
+--- a/crates/corefoundation/src/lib.rs
++++ b/crates/corefoundation/src/lib.rs
+@@ -13,6 +13,9 @@ pub mod boxed;
+ pub mod calendar;
+ pub mod callbacks;
+ pub mod collections;
++
++use base::CFTypeRef;
++use callbacks::Policy;
+ mod diskarbitration;
+ pub mod eightbit;
+ /// Only on Darwin: nowhere else is there another CoreFoundation to meet.
+@@ -48,9 +51,106 @@ pub fn bootstrap() {
+     uuid::class();
+ }
+ 
++/// The interned string a constant name is spelled with, which is what the
++/// CoreFoundation globals hold.
++fn name_object(text: &str) -> u64 {
++    base::interned_name(text)
++}
++
++/// `CFUserNotificationRef CFUserNotificationCreate(CFAllocatorRef,
++/// CFTimeInterval, CFOptionFlags, SInt32 *, CFDictionaryRef)`.
++///
++/// There is no user-notification server on this host. The request is accepted
++/// as an object that carries nothing, so a caller that only needs a handle does
++/// not crash; nothing is ever shown and no reply arrives.
++///
++/// # Safety
++///
++/// `out_error` is null or writable.
++pub unsafe extern "C" fn CFUserNotificationCreate(
++    _allocator: CFTypeRef,
++    _timeout: f64,
++    _flags: u64,
++    out_error: *mut i32,
++    _dictionary: CFTypeRef,
++) -> CFTypeRef {
++    if !out_error.is_null() {
++        // SAFETY: writable, per the caller.
++        unsafe { out_error.write(0) };
++    }
++    collections::new_dictionary(&[], Policy::from_key_callbacks(), Policy::from_type_callbacks(), false)
++}
++
++/// `SInt32 CFUserNotificationDisplayAlert(CFTimeInterval, CFOptionFlags,
++/// CFURLRef, CFURLRef, CFURLRef, CFStringRef, CFStringRef, CFStringRef,
++/// CFOptionFlags *)`.
++///
++/// Nothing can be displayed, so the answer is the default button
++/// (`kCFUserNotificationDefaultResponse`). Nothing is written to the
++/// out-parameter, which callers treat as "no button was pressed".
++///
++/// # Safety
++///
++/// None beyond being called as the C function it is.
++pub unsafe extern "C" fn CFUserNotificationDisplayAlert(
++    _timeout: f64,
++    _flags: u64,
++    _icon: CFTypeRef,
++    _sound: CFTypeRef,
++    _localization: CFTypeRef,
++    _title: CFTypeRef,
++    _message: CFTypeRef,
++    _default_button: CFTypeRef,
++    _response: *mut u64,
++) -> i32 {
++    0
++}
++
++/// `CFErrorRef CFErrorCreate(CFAllocatorRef, CFStringRef domain, CFIndex code,
++/// CFDictionaryRef userInfo)`.
++///
++/// Errors here are not consulted for behaviour; the object carries its code and
++/// description so a caller that logs one sees something meaningful.
++///
++/// # Safety
++///
++/// `domain` is null or a live string; `user_info` is null or a dictionary.
++pub unsafe extern "C" fn CFErrorCreate(
++    _allocator: CFTypeRef,
++    domain: CFTypeRef,
++    code: i64,
++    user_info: CFTypeRef,
++) -> CFTypeRef {
++    let domain = if domain.is_null() {
++        string::immortal("CFErrorDomain")
++    } else {
++        // SAFETY: a live string, retained for the dictionary.
++        unsafe { api::CFRetain(domain) };
++        domain
++    };
++    let code_object = collections::new_number(collections::Number::Integer(code));
++    let key_code = name_object("code") as CFTypeRef;
++    let key_domain = name_object("domain") as CFTypeRef;
++    let _ = user_info;
++    let error = collections::new_dictionary(
++        &[(key_code, code_object), (key_domain, domain)],
++        Policy::from_key_callbacks(),
++        Policy::from_type_callbacks(),
++        false,
++    );
++    // SAFETY: objects this function made. The dictionary kept its own reference
++    // to the retained domain; the immortal string needs none.
++    unsafe {
++        api::CFRelease(code_object);
++    }
++    error
++}
++
+ exports::exports! {
+     functions {
+         "CFRetain" => api::CFRetain,
++        "CFErrorCreate" => CFErrorCreate,
++        "CFUserNotificationDisplayAlert" => CFUserNotificationDisplayAlert,
+         "CFRelease" => api::CFRelease,
+         "CFAutorelease" => api::CFAutorelease,
+         "CFMakeCollectable" => api::CFMakeCollectable,
+@@ -248,6 +348,15 @@ exports::exports! {
+         "CFRunLoopTimerIsValid" => api::CFRunLoopTimerIsValid,
+         "CFRunLoopGetNextTimerFireDate" => api::CFRunLoopGetNextTimerFireDate,
+     }
++    // `___NSDictionary0__` is the empty dictionary object itself, which the
++    // guest reaches through `__DATA`, not through a function.
++    data {
++        "___NSDictionary0__struct" => data_symbols()
++            .into_iter()
++            .find(|(name, _)| name == "___NSDictionary0__")
++            .map(|(_, cell)| cell)
++            .unwrap_or(0),
++    }
+     groups {
+         calendar,
+         preferences,
+diff --git a/crates/corevideo/src/lib.rs b/crates/corevideo/src/lib.rs
+index fc4d638..853377a 100644
+--- a/crates/corevideo/src/lib.rs
++++ b/crates/corevideo/src/lib.rs
+@@ -4,6 +4,8 @@
+ pub mod pixel_buffer;
+ 
+ use std::ffi::c_void;
++
++use corefoundation::base::CFTypeRef;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, Mutex};
+ 
+@@ -349,8 +351,110 @@ unsafe extern "C" fn fire(_timer: *const c_void, info: *mut c_void) {
+     unsafe { callback(info, &now, &output, 0, &mut flags_out, context) };
+ }
+ 
++/// A `CVMetalTextureCache`: Metal textures made from CVPixelBuffers.
++///
++/// Stored as an opaque handle; the textures it makes are the buffers'
++/// IOSurfaces, wrapped by whoever asks for the texture.
++struct MetalTextureCache;
++
++/// `CVMetalTextureCacheRef CVMetalTextureCacheCreate(CFAllocatorRef,
++/// CFDictionaryRef, MTLDeviceRef, CFDictionaryRef, CVMetalTextureCacheRef *)`.
++///
++/// # Safety
++///
++/// `cache` is null or writable; the other arguments are unused.
++#[allow(non_snake_case)]
++pub unsafe extern "C" fn CVMetalTextureCacheCreate(
++    _allocator: CFTypeRef,
++    _attributes: CFTypeRef,
++    _device: CFTypeRef,
++    _texture_attributes: CFTypeRef,
++    cache: *mut CFTypeRef,
++) -> i32 {
++    if cache.is_null() {
++        return -6661; // kCVReturnInvalidArgument
++    }
++    let handle = Box::into_raw(Box::new(MetalTextureCache)) as CFTypeRef;
++    // SAFETY: writable, checked above.
++    unsafe { cache.write(handle) };
++    0 // kCVReturnSuccess
++}
++
++/// `CVReturn CVMetalTextureCacheCreateTextureFromImage(CFAllocatorRef,
++/// CVMetalTextureCacheRef, CVImageBufferRef, CFDictionaryRef, MTLPixelFormat,
++/// size_t, size_t, size_t, CVMetalTextureRef *)`.
++///
++/// The image is passed through as the texture handle: on this runtime the
++/// pixel buffer *is* the surface a Metal texture is made from, so a caller that
++/// wraps it gets an object it can read back with `CVMetalTextureGetTexture`.
++///
++/// # Safety
++///
++/// `image` is null or a live buffer; `texture` is null or writable.
++#[allow(non_snake_case)]
++pub unsafe extern "C" fn CVMetalTextureCacheCreateTextureFromImage(
++    _allocator: CFTypeRef,
++    _cache: CFTypeRef,
++    image: CFTypeRef,
++    _attributes: CFTypeRef,
++    _format: u32,
++    _width: usize,
++    _height: usize,
++    _plane: usize,
++    texture: *mut CFTypeRef,
++) -> i32 {
++    if texture.is_null() {
++        return -6661; // kCVReturnInvalidArgument
++    }
++    if image.is_null() {
++        return -6683; // kCVReturnInvalidPixelBufferAttributes
++    }
++    // SAFETY: writable, checked above; the caller owns a reference to `image`.
++    unsafe {
++        corefoundation::api::CFRetain(image);
++        texture.write(image);
++    }
++    0
++}
++
++/// `CVMetalTextureRef CVMetalTextureGetTexture(CVMetalTextureRef)`.
++/// The pixel buffer *is* the image a texture is made from here, so the handle
++/// is returned unchanged and the caller's reference is retained.
++///
++/// # Safety
++///
++/// The handle is null or one this module made.
++#[allow(non_snake_case)]
++pub unsafe extern "C" fn CVMetalTextureGetTexture(texture: CFTypeRef) -> CFTypeRef {
++    if texture.is_null() {
++        return std::ptr::null();
++    }
++    // SAFETY: a live object the caller holds a reference to.
++    unsafe { corefoundation::api::CFRetain(texture) };
++    texture
++}
++
++/// `CFTypeRef CVMetalTextureGetImageBuffer(CVMetalTextureRef)`.
++///
++/// # Safety
++///
++/// The handle is null or one this module made.
++#[allow(non_snake_case)]
++pub unsafe extern "C" fn CVMetalTextureGetImageBuffer(texture: CFTypeRef) -> CFTypeRef {
++    if texture.is_null() {
++        return std::ptr::null();
++    }
++    // SAFETY: a live object the caller holds a reference to.
++    unsafe { corefoundation::api::CFRetain(texture) };
++    texture
++}
++
+ exports::exports! {
+     functions {
++        "CVMetalTextureCacheCreate" => CVMetalTextureCacheCreate,
++        "CVMetalTextureCacheCreateTextureFromImage" => CVMetalTextureCacheCreateTextureFromImage,
++        "CVMetalTextureGetTexture" => CVMetalTextureGetTexture,
++        "CVMetalTextureGetImageBuffer" => CVMetalTextureGetImageBuffer,
+         "CVDisplayLinkCreateWithCGDisplay" => CVDisplayLinkCreateWithCGDisplay,
+         "CVDisplayLinkCreateWithActiveCGDisplays" => CVDisplayLinkCreateWithActiveCGDisplays,
+         "CVDisplayLinkSetOutputCallback" => CVDisplayLinkSetOutputCallback,
+diff --git a/crates/corevideo/src/pixel_buffer.rs b/crates/corevideo/src/pixel_buffer.rs
+index a1e2968..a5208ad 100644
+--- a/crates/corevideo/src/pixel_buffer.rs
++++ b/crates/corevideo/src/pixel_buffer.rs
+@@ -822,6 +822,12 @@ pub unsafe extern "C" fn CVPixelBufferGetTypeID() -> usize {
+     corefoundation::base::type_id(class())
+ }
+ 
++/// The pixel buffer's class, for callers outside this module that have a
++/// `CFTypeRef` and must know whether it is one.
++pub fn buffer_class() -> &'static Class {
++    class()
++}
++
+ pub unsafe extern "C" fn CVPixelBufferGetWidth(buffer: CFTypeRef) -> usize {
+     forward_foreign!(
+         c"CVPixelBufferGetWidth",
+diff --git a/crates/rosemary/src/frameworks.rs b/crates/rosemary/src/frameworks.rs
+index ba20692..988a2f8 100644
+--- a/crates/rosemary/src/frameworks.rs
++++ b/crates/rosemary/src/frameworks.rs
+@@ -870,7 +870,14 @@ fn coremedia_data() -> Vec<(String, u64)> {
+ }
+ 
+ fn corevideo_data() -> Vec<(String, u64)> {
+-    corefoundation::base::string_globals(CV_CONSTANTS)
++    let mut out = corefoundation::base::string_globals(CV_CONSTANTS);
++    // Keys used when making Metal textures from a pixel buffer. They are read
++    // back by name, so a cell holding the name is what a lookup finds.
++    out.extend(corefoundation::base::string_globals(&[
++        ("_kCVMetalTextureUsage", "CVMetalTextureUsage"),
++        ("_kCVMetalTextureIsFlipped", "CVMetalTextureIsFlipped"),
++    ]));
++    out
+ }
+ 
+ fn avfoundation_data() -> Vec<(String, u64)> {
+diff --git a/crates/rosemary/src/objc/dispatch.rs b/crates/rosemary/src/objc/dispatch.rs
+index 4c5ccc7..1239e98 100644
+--- a/crates/rosemary/src/objc/dispatch.rs
++++ b/crates/rosemary/src/objc/dispatch.rs
+@@ -197,6 +197,9 @@ pub(super) static RUNTIME: &[Runtime] = &[
+     // `objc_storeWeak`'s *value* is the exception, and it is the ordinary one:
+     // a guest may legally weakly reference a class, and a class is the one
+     // pointer that means something different on each side.
++    // Classes are the runtime's own, so the pointers an enumeration returns
++    // need no translation; the guest supplies (or receives) a plain buffer.
++    rt!("objc_copyClassList", P, P),
+     rt!("objc_copyClassNamesForImage", P, P, P),
+     // `void objc_copyStruct(void *dest, const void *src, ptrdiff_t size,
+     // BOOL atomic, BOOL hasStrong)` - a synthesized accessor of a struct-typed
+@@ -210,6 +213,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
+     // `object_getClass` of a class is its metaclass, so the argument is
+     // translated as well as the result.
+     rtc!([0] -> true, "objc_getClass", P, P),
++    rt!("objc_getClassList", I32, P, I32),
+     rtc!([] -> true, "objc_getMetaClass", P, P),
+     //
+     // A `@synthesize`d property does not compile to a load and a store. For
+diff --git a/crates/security/Cargo.toml b/crates/security/Cargo.toml
+index 2395553..c0f662e 100644
+--- a/crates/security/Cargo.toml
++++ b/crates/security/Cargo.toml
+@@ -16,6 +16,7 @@ getrandom.workspace = true
+ rustls-pki-types.workspace = true
+ webpki.workspace = true
+ webpki-roots.workspace = true
++rustls.workspace = true
+ 
+ [lints]
+ workspace = true
+diff --git a/crates/security/src/lib.rs b/crates/security/src/lib.rs
+index f85da7f..b2c5766 100644
+--- a/crates/security/src/lib.rs
++++ b/crates/security/src/lib.rs
+@@ -1,10 +1,12 @@
+ pub mod codesign;
+ pub mod keychain;
++pub mod securetransport;
+ pub mod trust;
+ 
+ exports::group! {
+     codesign,
+     keychain,
++    securetransport,
+     trust,
+ }
+ 
+diff --git a/crates/security/src/trust.rs b/crates/security/src/trust.rs
+index fef537a..f73ade1 100644
+--- a/crates/security/src/trust.rs
++++ b/crates/security/src/trust.rs
+@@ -61,9 +61,16 @@ enum Payload {
+     /// `SecPolicyCreateBasicX509`: a chain to a trusted root, no name and no
+     /// extended key usage required.
+     BasicX509,
++    /// `SecPolicyCreateSSL`: the basic check, plus the server's name.
++    Ssl {
++        server: bool,
++        hostname: String,
++    },
+     Trust {
+         chain: Vec<Vec<u8>>,
+         options: u32,
++        /// The name the leaf must be valid for, when a policy named one.
++        hostname: String,
+     },
+ }
+ 
+@@ -367,6 +374,61 @@ pub unsafe extern "C" fn SecPolicyCreateBasicX509() -> CFTypeRef {
+     new(Payload::BasicX509)
+ }
+ 
++/// `CFStringRef` contents as a `String`, or empty for anything else.
++///
++/// # Safety
++///
++/// `object` is null or a live `CFString`.
++unsafe fn string_of(object: CFTypeRef) -> String {
++    if object.is_null() {
++        return String::new();
++    }
++    let mut buffer = [0u8; 256];
++    // SAFETY: a `CFString`, per the caller, and a buffer this function owns.
++    let okay = unsafe {
++        corefoundation::api::CFStringGetCString(
++            object,
++            buffer.as_mut_ptr() as *mut i8,
++            buffer.len() as isize,
++            0x0800_0100,
++        )
++    };
++    if okay == 0 {
++        return String::new();
++    }
++    let end = buffer.iter().position(|&b| b == 0).unwrap_or(buffer.len());
++    String::from_utf8_lossy(&buffer[..end]).to_string()
++}
++
++/// `SecPolicyRef SecPolicyCreateSSL(Boolean server, CFStringRef hostname)`.
++///
++/// A server policy checks that a trust's leaf certificate is valid for
++/// `hostname`; a client policy is the basic X.509 check.
++///
++/// # Safety
++///
++/// `hostname` is null or a live `CFString`.
++pub unsafe extern "C" fn SecPolicyCreateSSL(server: u8, hostname: CFTypeRef) -> CFTypeRef {
++    // SAFETY: the caller's guarantee.
++    let name = unsafe { string_of(hostname) };
++    new(Payload::Ssl {
++        server: server != 0,
++        hostname: name,
++    })
++}
++
++/// `SecPolicyRef SecPolicyCreateRevocation(CFOptionFlags)`.
++///
++/// Revocation checking is not performed on this host, which Apple also answers
++/// with a working policy object when the caller's flags select nothing to do.
++///
++/// # Safety
++///
++/// None beyond being called as the C function it is.
++pub unsafe extern "C" fn SecPolicyCreateRevocation(_flags: u32) -> CFTypeRef {
++    new(Payload::BasicX509)
++}
++
+ /// `OSStatus SecTrustCreateWithCertificates(CFTypeRef certificates, CFTypeRef
+ /// policies, SecTrustRef *trust)`.
+ ///
+@@ -386,6 +448,7 @@ pub unsafe extern "C" fn SecTrustCreateWithCertificates(
+         return PARAM;
+     }
+     let mut chain = Vec::new();
++    let mut hostname = String::new();
+     // SAFETY: the caller's guarantee.
+     for certificate in unsafe { one_or_many(certificates) } {
+         // SAFETY: an element of a live array, or the object itself.
+@@ -397,18 +460,32 @@ pub unsafe extern "C" fn SecTrustCreateWithCertificates(
+     // SAFETY: the caller's guarantee.
+     for policy in unsafe { one_or_many(policies) } {
+         // SAFETY: as above.
+-        if !matches!(unsafe { payload(policy) }, Some(Payload::BasicX509)) {
+-            eprintln!(
+-                "rosemary: security: SecTrustCreateWithCertificates: only the basic X.509 policy is supported"
+-            );
+-            return PARAM;
++        match unsafe { payload(policy) } {
++            Some(Payload::BasicX509) => {}
++            Some(Payload::Ssl { server, hostname: name }) => {
++                if *server && !name.is_empty() {
++                    hostname = name.clone();
++                }
++            }
++            _ => {
++                eprintln!(
++                    "rosemary: security: SecTrustCreateWithCertificates: only the basic X.509 and SSL policies are supported"
++                );
++                return PARAM;
++            }
+         }
+     }
+     if chain.is_empty() {
+         return PARAM;
+     }
+     // SAFETY: writable, checked above.
+-    unsafe { trust.write(new(Payload::Trust { chain, options: 0 })) };
++    unsafe {
++        trust.write(new(Payload::Trust {
++            chain,
++            options: 0,
++            hostname,
++        }))
++    };
+     SUCCESS
+ }
+ 
+@@ -443,7 +520,7 @@ impl webpki::ExtendedKeyUsageValidator for AnyUsage {
+ /// FIXME (ACCURACY): the anchors are Mozilla's root program (`webpki-roots`),
+ /// not the keychain's. The two sets largely agree for public servers; a root
+ /// only Apple ships is untrusted here.
+-fn evaluate(chain: &[Vec<u8>], options: u32) -> u32 {
++fn evaluate(chain: &[Vec<u8>], options: u32, hostname: &str) -> u32 {
+     let Some((leaf, rest)) = chain.split_first() else {
+         return result::FATAL;
+     };
+@@ -470,7 +547,17 @@ fn evaluate(chain: &[Vec<u8>], options: u32) -> u32 {
+             None,
+         );
+         match verified {
+-            Ok(_) => return result::UNSPECIFIED,
++            Ok(_) => {
++                if !hostname.is_empty() {
++                    let Ok(name) = rustls_pki_types::ServerName::try_from(hostname) else {
++                        return result::RECOVERABLE;
++                    };
++                    if end_entity.verify_is_valid_for_subject_name(&name).is_err() {
++                        return result::RECOVERABLE;
++                    }
++                }
++                return result::UNSPECIFIED;
++            }
+             Err(webpki::Error::CertExpired { not_after, .. })
+                 if options & (ALLOW_EXPIRED | ALLOW_EXPIRED_ROOT) != 0 =>
+             {
+@@ -482,6 +569,159 @@ fn evaluate(chain: &[Vec<u8>], options: u32) -> u32 {
+     result::RECOVERABLE
+ }
+ 
++/// `Boolean SecTrustEvaluateWithError(SecTrustRef, CFErrorRef *)`.
++///
++/// `true` only when the chain evaluates as trusted under its policy, which
++/// includes the server-name check. Nothing is written to `error`; a caller that
++/// wants details has the older `SecTrustEvaluate`.
++///
++/// # Safety
++///
++/// `trust` is null or a live object.
++pub unsafe extern "C" fn SecTrustEvaluateWithError(
++    trust: CFTypeRef,
++    error: *mut CFTypeRef,
++) -> u8 {
++    if !error.is_null() {
++        // SAFETY: writable, per the caller.
++        unsafe { error.write(std::ptr::null()) };
++    }
++    // SAFETY: the caller's guarantee.
++    let Some(Payload::Trust {
++        chain,
++        options,
++        hostname,
++    }) = (unsafe { payload(trust) })
++    else {
++        return 0;
++    };
++    if evaluate(chain, *options, hostname) == result::UNSPECIFIED {
++        1
++    } else {
++        0
++    }
++}
++
++/// `OSStatus SecTrustSetOCSPResponse(SecTrustRef, CFTypeRef)`.
++///
++/// Revocation is not consulted, so the response is accepted and ignored rather
++/// than failing the caller's setup.
++///
++/// # Safety
++///
++/// `trust` is null or a live object.
++pub unsafe extern "C" fn SecTrustSetOCSPResponse(trust: CFTypeRef, _response: CFTypeRef) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    match unsafe { payload(trust) } {
++        Some(Payload::Trust { .. }) => SUCCESS,
++        _ => PARAM,
++    }
++}
++
++/// `OSStatus SecTrustSetNetworkFetchAllowed(SecTrustRef, Boolean)`.
++///
++/// # Safety
++///
++/// `trust` is null or a live object.
++pub unsafe extern "C" fn SecTrustSetNetworkFetchAllowed(trust: CFTypeRef, _allowed: u8) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    match unsafe { payload(trust) } {
++        Some(Payload::Trust { .. }) => SUCCESS,
++        _ => PARAM,
++    }
++}
++
++/// `OSStatus SecTrustSetAnchorCertificates(SecTrustRef, CFArrayRef)`.
++///
++/// Evaluation always uses the host's roots, so replacing the anchor set is
++/// refused rather than silently ignored: a caller that pins its own roots must
++/// not be told it succeeded.
++///
++/// # Safety
++///
++/// `trust` is null or a live object.
++pub unsafe extern "C" fn SecTrustSetAnchorCertificates(
++    trust: CFTypeRef,
++    _anchors: CFTypeRef,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    match unsafe { payload(trust) } {
++        Some(Payload::Trust { .. }) => {
++            eprintln!(
++                "rosemary: security: SecTrustSetAnchorCertificates: anchors cannot be replaced; the host's roots are used"
++            );
++            PARAM
++        }
++        _ => PARAM,
++    }
++}
++
++/// `OSStatus SecTrustGetTrustResult(SecTrustRef, SecTrustResultType *)`.
++///
++/// # Safety
++///
++/// `trust` is null or a live object; `out` is null or writable.
++pub unsafe extern "C" fn SecTrustGetTrustResult(trust: CFTypeRef, out: *mut u32) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    unsafe { SecTrustEvaluate(trust, out) }
++}
++
++/// `int SecTrustGetCertificateCount(SecTrustRef)`.
++///
++/// # Safety
++///
++/// `trust` is null or a live object.
++pub unsafe extern "C" fn SecTrustGetCertificateCount(trust: CFTypeRef) -> i64 {
++    // SAFETY: the caller's guarantee.
++    match unsafe { payload(trust) } {
++        Some(Payload::Trust { chain, .. }) => chain.len() as i64,
++        _ => 0,
++    }
++}
++
++/// `CFArrayRef SecTrustCopyCertificateChain(SecTrustRef)`.
++///
++/// # Safety
++///
++/// `trust` is null or a live object.
++pub unsafe extern "C" fn SecTrustCopyCertificateChain(trust: CFTypeRef) -> CFTypeRef {
++    // SAFETY: the caller's guarantee.
++    let Some(Payload::Trust { chain, .. }) = (unsafe { payload(trust) }) else {
++        return std::ptr::null();
++    };
++    let certificates: Vec<CFTypeRef> = chain
++        .iter()
++        .map(|der| new(Payload::Certificate(der.clone())))
++        .filter(|certificate| !certificate.is_null())
++        .collect();
++    let array = corefoundation::collections::new_array(
++        &certificates,
++        corefoundation::callbacks::Policy::from_type_callbacks(),
++        false,
++    );
++    for certificate in certificates {
++        // SAFETY: the array took its own reference.
++        unsafe { corefoundation::api::CFRelease(certificate) };
++    }
++    array
++}
++
++/// `SecCertificateRef SecTrustGetCertificateAtIndex(SecTrustRef, CFIndex)`.
++///
++/// # Safety
++///
++/// `trust` is null or a live object.
++pub unsafe extern "C" fn SecTrustGetCertificateAtIndex(trust: CFTypeRef, index: i64) -> CFTypeRef {
++    // SAFETY: the caller's guarantee.
++    let Some(Payload::Trust { chain, .. }) = (unsafe { payload(trust) }) else {
++        return std::ptr::null();
++    };
++    match usize::try_from(index).ok().and_then(|i| chain.get(i)) {
++        Some(der) => new(Payload::Certificate(der.clone())),
++        None => std::ptr::null(),
++    }
++}
++
+ /// `OSStatus SecTrustEvaluate(SecTrustRef, SecTrustResultType *)`.
+ ///
+ /// # Safety
+@@ -489,10 +729,15 @@ fn evaluate(chain: &[Vec<u8>], options: u32) -> u32 {
+ /// `trust` is null or a live object, and `out` is null or writable.
+ pub unsafe extern "C" fn SecTrustEvaluate(trust: CFTypeRef, out: *mut u32) -> OSStatus {
+     // SAFETY: the caller's guarantee.
+-    let Some(Payload::Trust { chain, options }) = (unsafe { payload(trust) }) else {
++    let Some(Payload::Trust {
++        chain,
++        options,
++        hostname,
++    }) = (unsafe { payload(trust) })
++    else {
+         return PARAM;
+     };
+-    let verdict = evaluate(chain, *options);
++    let verdict = evaluate(chain, *options, hostname);
+     if !out.is_null() {
+         // SAFETY: writable, per the caller.
+         unsafe { out.write(verdict) };
+@@ -525,6 +770,8 @@ exports::exports! {
+     functions {
+         "SecCertificateCreateWithData" => SecCertificateCreateWithData,
+         "SecPolicyCreateBasicX509" => SecPolicyCreateBasicX509,
++        "SecPolicyCreateSSL" => SecPolicyCreateSSL,
++        "SecPolicyCreateRevocation" => SecPolicyCreateRevocation,
+         "SecTrustCreateWithCertificates" => SecTrustCreateWithCertificates,
+         "SecTrustSetOptions" => SecTrustSetOptions,
+         "SecTrustEvaluate" => SecTrustEvaluate,
+@@ -533,6 +780,14 @@ exports::exports! {
+         "SecTrustSettingsCopyCertificates" => SecTrustSettingsCopyCertificates,
+         "SecTrustSettingsCopyTrustSettings" => SecTrustSettingsCopyTrustSettings,
+         "SecPolicyCopyProperties" => SecPolicyCopyProperties,
++        "SecTrustEvaluateWithError" => SecTrustEvaluateWithError,
++        "SecTrustSetOCSPResponse" => SecTrustSetOCSPResponse,
++        "SecTrustSetNetworkFetchAllowed" => SecTrustSetNetworkFetchAllowed,
++        "SecTrustSetAnchorCertificates" => SecTrustSetAnchorCertificates,
++        "SecTrustGetTrustResult" => SecTrustGetTrustResult,
++        "SecTrustGetCertificateCount" => SecTrustGetCertificateCount,
++        "SecTrustCopyCertificateChain" => SecTrustCopyCertificateChain,
++        "SecTrustGetCertificateAtIndex" => SecTrustGetCertificateAtIndex,
+         "SecCertificateCopyData" => SecCertificateCopyData,
+         "SecCertificateGetData" => SecCertificateGetData,
+     }
+diff --git a/crates/security/src/securetransport.rs b/crates/security/src/securetransport.rs
+new file mode 100644
+index 0000000..734276c
+--- /dev/null
++++ b/crates/security/src/securetransport.rs
+@@ -0,0 +1,612 @@
++//! SecureTransport: the `SSL*` TLS client API, over Rustls.
++//!
++//! A guest that carries its own network stack (the Roblox executor does) opens a
++//! context, installs `SSLSetIOFuncs` callbacks, sets the peer's name, and drives
++//! a handshake with `SSLHandshake`. Rustls does the TLS work; guest callbacks
++//! move the bytes so a non-blocking caller sees `errSSLWouldBlock`.
++//!
++//! The server is always verified: against the host's roots, and against the
++//! name given to `SSLSetPeerDomainName`. There is no "skip verification" path.
++
++#![allow(non_snake_case)]
++
++use std::ffi::c_void;
++use std::io::{Read, Write};
++
++use corefoundation::base::CFTypeRef;
++use rustls_pki_types::{CertificateDer, ServerName};
++
++type OSStatus = i32;
++/// `errSSLParam`.
++const PARAM: OSStatus = -50;
++/// `noErr`.
++const OK: OSStatus = 0;
++/// `errSSLCrypto`.
++const CRYPTO: OSStatus = -9802;
++/// `errSSLWouldBlock`.
++const WOULD_BLOCK: OSStatus = -9803;
++/// `errSSLProtocol`.
++const PROTOCOL: OSStatus = -9807;
++/// `errSSLPeerHandshakeFail`.
++const PEER_HANDSHAKE_FAIL: OSStatus = -9812;
++/// `errSSLPeerCertUnknown`.
++const PEER_CERT_UNKNOWN: OSStatus = -9814;
++/// `errSSLInternal`.
++const INTERNAL: OSStatus = -9817;
++
++/// `kSSLConnected`.
++const STATE_CONNECTED: i32 = 2;
++/// `kSSLHandshake`.
++const STATE_HANDSHAKE: i32 = 1;
++/// `kSSLIdle`.
++const STATE_IDLE: i32 = 0;
++
++/// `OSStatus (*SSLReadFunc)(SSLConnectionRef, void *, size_t *)`.
++type ReadFunc = Option<unsafe extern "C" fn(*const c_void, *mut c_void, *mut usize) -> OSStatus>;
++/// `OSStatus (*SSLWriteFunc)(SSLConnectionRef, const void *, size_t *)`.
++type WriteFunc = Option<unsafe extern "C" fn(*const c_void, *const c_void, *mut usize) -> OSStatus>;
++
++/// Handshake steps tried per call before yielding `errSSLWouldBlock`.
++const HANDSHAKE_STEPS: usize = 8;
++/// Bytes read from the guest per step.
++const IO_BUFFER: usize = 64 * 1024;
++
++struct Connection {
++    server_name: String,
++    read: ReadFunc,
++    write: WriteFunc,
++    io: *mut c_void,
++    /// TLS output not yet accepted by the guest.
++    outbound: Vec<u8>,
++    tls: Option<rustls::ClientConnection>,
++}
++
++impl Connection {
++    /// One guest read. `Err` carries the callback's refusal.
++    fn io_read(&mut self, buffer: &mut [u8]) -> Result<usize, OSStatus> {
++        let Some(read) = self.read else {
++            return Ok(0);
++        };
++        let mut count = buffer.len();
++        // SAFETY: the guest's callback, given its own connection reference and a
++        // writable buffer of the stated length.
++        let status = unsafe { read(self.io, buffer.as_mut_ptr() as *mut c_void, &mut count) };
++        match status {
++            OK | WOULD_BLOCK => Ok(count.min(buffer.len())),
++            other => Err(other),
++        }
++    }
++
++    /// Hand `data` to the guest; whatever it does not take stays queued.
++    fn io_write(&mut self, data: &[u8]) -> OSStatus {
++        let Some(write) = self.write else {
++            self.outbound.extend_from_slice(data);
++            return OK;
++        };
++        let mut left = data;
++        while !left.is_empty() {
++            let mut count = left.len();
++            // SAFETY: the guest's callback, its own connection reference, and a
++            // readable buffer of the stated length.
++            let status = unsafe { write(self.io, left.as_ptr() as *const c_void, &mut count) };
++            if status != OK && status != WOULD_BLOCK {
++                self.outbound.extend_from_slice(left);
++                return status;
++            }
++            if count == 0 {
++                break;
++            }
++            left = &left[count.min(left.len())..];
++        }
++        if !left.is_empty() {
++            self.outbound.extend_from_slice(left);
++        }
++        OK
++    }
++
++    /// Send queued TLS output to the guest.
++    fn flush(&mut self) -> OSStatus {
++        let queued = std::mem::take(&mut self.outbound);
++        self.io_write(&queued)
++    }
++
++    /// Move whatever the current handshake state wants written into `outbound`.
++    fn drain_tls(&mut self) {
++        let Some(tls) = self.tls.as_mut() else {
++            return;
++        };
++        let mut chunk = [0u8; IO_BUFFER];
++        loop {
++            match tls.write_tls(&mut &mut chunk[..]) {
++                Ok(0) | Err(_) => break,
++                Ok(n) => self.outbound.extend_from_slice(&chunk[..n]),
++            }
++        }
++    }
++
++    /// Give guest bytes to Rustls and process whatever became complete.
++    fn feed(&mut self, data: &[u8]) -> Result<(), OSStatus> {
++        let Some(tls) = self.tls.as_mut() else {
++            return Err(INTERNAL);
++        };
++        let mut cursor = data;
++        while !cursor.is_empty() {
++            match tls.read_tls(&mut cursor) {
++                Ok(0) => break,
++                Ok(_) => {
++                    tls.process_new_packets().map_err(|_| PEER_CERT_UNKNOWN)?;
++                }
++                Err(_) => return Err(PROTOCOL),
++            }
++        }
++        Ok(())
++    }
++
++    fn established(&self) -> bool {
++        self.tls.as_ref().is_some_and(|tls| !tls.is_handshaking())
++    }
++}
++
++// A context is created, used and dropped by one guest thread at a time; the
++// handle is opaque and never shared inside the runtime.
++unsafe impl Send for Connection {}
++
++fn roots() -> &'static std::sync::Arc<rustls::RootCertStore> {
++    static ROOTS: std::sync::OnceLock<std::sync::Arc<rustls::RootCertStore>> =
++        std::sync::OnceLock::new();
++    ROOTS.get_or_init(|| {
++        use rustls_pki_types::pem::PemObject;
++        const BUNDLES: &[&str] = &[
++            "/etc/ssl/certs/ca-certificates.crt",
++            "/etc/pki/tls/certs/ca-bundle.crt",
++            "/etc/ssl/ca-bundle.pem",
++            "/etc/ssl/cert.pem",
++            "/usr/local/share/certs/ca-root-nss.crt",
++        ];
++        let named = std::env::var_os("SSL_CERT_FILE").map(std::path::PathBuf::from);
++        let pem = named
++            .into_iter()
++            .chain(BUNDLES.iter().map(std::path::PathBuf::from))
++            .find_map(|path| std::fs::read(path).ok())
++            .unwrap_or_default();
++        let mut store = rustls::RootCertStore::empty();
++        for der in CertificateDer::pem_slice_iter(&pem).filter_map(Result::ok) {
++            let _ = store.add(der);
++        }
++        std::sync::Arc::new(store)
++    })
++}
++
++fn config() -> &'static std::sync::Arc<rustls::ClientConfig> {
++    static CONFIG: std::sync::OnceLock<std::sync::Arc<rustls::ClientConfig>> =
++        std::sync::OnceLock::new();
++    CONFIG.get_or_init(|| {
++        let provider = rustls::crypto::ring::default_provider();
++        let config = rustls::ClientConfig::builder_with_provider(provider.into())
++            .with_safe_default_protocol_versions()
++            .expect("the ring provider supports the default TLS versions")
++            .with_root_certificates(roots().clone())
++            .with_no_client_auth();
++        std::sync::Arc::new(config)
++    })
++}
++
++#[repr(C)]
++struct Body {
++    isa: *const objc::class::Class,
++    connection: *mut Connection,
++}
++
++fn class() -> &'static objc::class::Class {
++    static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
++    let pointer = *CLASS.get_or_init(|| {
++        let class = corefoundation::base::register(c"__R3SSLContext", None, size_of::<Body>(), true);
++        class.replace_method(
++            objc::sel::get("dealloc"),
++            dealloc as *const c_void,
++            c"v16@0:8",
++        );
++        objc::class::ptr(class) as usize
++    });
++    // SAFETY: a class registered above and kept for the process.
++    unsafe {
++        objc::class::from_ptr(pointer as *const objc::class::Class).expect("an SSL context class")
++    }
++}
++
++unsafe extern "C" fn dealloc(receiver: objc::object::Id, _sel: objc::sel::Sel) {
++    // SAFETY: this class's layout, and the connection `SSLCreateContext` boxed.
++    unsafe {
++        let body = receiver as *mut Body;
++        if !(*body).connection.is_null() {
++            drop(Box::from_raw((*body).connection));
++        }
++        objc::arc::finalize(receiver);
++    }
++}
++
++fn new_handle(connection: Connection) -> CFTypeRef {
++    // SAFETY: `Body` is the registered layout.
++    let body = unsafe { corefoundation::base::allocate::<Body>(class()) };
++    if body.is_null() {
++        return std::ptr::null();
++    }
++    // SAFETY: a freshly allocated body, written once before publication.
++    unsafe { (*body).connection = Box::into_raw(Box::new(connection)) };
++    body as CFTypeRef
++}
++
++/// # Safety
++///
++/// `ctx` is null or a live context from [`SSLCreateContext`].
++unsafe fn connection<'a>(ctx: CFTypeRef) -> Option<&'a mut Connection> {
++    if ctx.is_null() || !unsafe { corefoundation::base::is_kind_of(ctx, class()) } {
++        return None;
++    }
++    let body = ctx as *mut Body;
++    if unsafe { (*body).connection.is_null() } {
++        return None;
++    }
++    // SAFETY: a body of this class, live for `'a`.
++    Some(unsafe { &mut *(*body).connection })
++}
++
++/// `SSLContextRef SSLCreateContext(CFAllocatorRef, SSLProtocolSide,
++/// SSLConnectionType)`.
++///
++/// # Safety
++///
++/// None beyond being called as the C function it is.
++pub unsafe extern "C" fn SSLCreateContext(
++    _allocator: CFTypeRef,
++    _side: i32,
++    _kind: i32,
++) -> CFTypeRef {
++    new_handle(Connection {
++        server_name: String::new(),
++        read: None,
++        write: None,
++        io: std::ptr::null_mut(),
++        outbound: Vec::new(),
++        tls: None,
++    })
++}
++
++/// `OSStatus SSLSetIOFuncs(SSLContextRef, SSLReadFunc, SSLWriteFunc)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; the callbacks stay valid while it is used.
++pub unsafe extern "C" fn SSLSetIOFuncs(
++    ctx: CFTypeRef,
++    read: ReadFunc,
++    write: WriteFunc,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    connection.read = read;
++    connection.write = write;
++    OK
++}
++
++/// `OSStatus SSLSetConnection(SSLContextRef, SSLConnectionRef)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `io` is the value the callbacks expect.
++pub unsafe extern "C" fn SSLSetConnection(ctx: CFTypeRef, io: *mut c_void) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    connection.io = io;
++    OK
++}
++
++/// `OSStatus SSLSetPeerDomainName(SSLContextRef, const char *, size_t)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `name` is readable for `length` bytes.
++pub unsafe extern "C" fn SSLSetPeerDomainName(
++    ctx: CFTypeRef,
++    name: *const u8,
++    length: usize,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if name.is_null() || length == 0 {
++        return PARAM;
++    }
++    // SAFETY: readable for `length`, per the caller.
++    let bytes = unsafe { std::slice::from_raw_parts(name, length) };
++    let text = String::from_utf8_lossy(bytes);
++    connection.server_name = text.trim_end_matches('\0').to_string();
++    OK
++}
++
++/// `OSStatus SSLSetProtocolVersionMin(SSLContextRef, SSLProtocol)`.
++///
++/// Rustls always negotiates TLS 1.2 or newer, so every minimum a caller can ask
++/// for that this runtime supports is already met.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context.
++pub unsafe extern "C" fn SSLSetProtocolVersionMin(ctx: CFTypeRef, _version: i32) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    if unsafe { connection(ctx) }.is_some() {
++        OK
++    } else {
++        PARAM
++    }
++}
++
++/// `OSStatus SSLSetSessionOption(SSLContextRef, SSLSessionOption, Boolean)`.
++///
++/// The breakout and ticket options are accepted; verification is always on, so
++/// `kSSLSessionOptionBreakOnServerAuth` cannot turn it off.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context.
++pub unsafe extern "C" fn SSLSetSessionOption(
++    ctx: CFTypeRef,
++    _option: i32,
++    _value: u8,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    if unsafe { connection(ctx) }.is_some() {
++        OK
++    } else {
++        PARAM
++    }
++}
++
++/// `OSStatus SSLHandshake(SSLContextRef)`.
++///
++/// Creates the connection on the first call, then pumps it. Returns
++/// `errSSLWouldBlock` while the transport has nothing new, which is what a
++/// caller loops on.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context.
++pub unsafe extern "C" fn SSLHandshake(ctx: CFTypeRef) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++
++    if connection.tls.is_none() {
++        let Ok(name) = ServerName::try_from(connection.server_name.clone()) else {
++            return PEER_HANDSHAKE_FAIL;
++        };
++        match rustls::ClientConnection::new(config().clone(), name) {
++            Ok(tls) => connection.tls = Some(tls),
++            Err(_) => return INTERNAL,
++        }
++    }
++
++    connection.drain_tls();
++    let mut status = connection.flush();
++    if status != OK {
++        return status;
++    }
++
++    for _ in 0..HANDSHAKE_STEPS {
++        if connection.established() {
++            return OK;
++        }
++        let mut buffer = [0u8; IO_BUFFER];
++        let read = match connection.io_read(&mut buffer) {
++            Ok(read) => read,
++            Err(code) => return code,
++        };
++        if read == 0 {
++            return WOULD_BLOCK;
++        }
++        if let Err(code) = connection.feed(&buffer[..read]) {
++            return code;
++        }
++        connection.drain_tls();
++        status = connection.flush();
++        if status != OK {
++            return status;
++        }
++    }
++
++    if connection.established() {
++        OK
++    } else {
++        WOULD_BLOCK
++    }
++}
++
++/// Read plaintext Rustls already produced, returning how much.
++fn read_plaintext(connection: &mut Connection, buffer: &mut [u8]) -> usize {
++    let Some(tls) = connection.tls.as_mut() else {
++        return 0;
++    };
++    let mut written = 0;
++    while written < buffer.len() {
++        match tls.reader().read(&mut buffer[written..]) {
++            Ok(0) => break,
++            Ok(n) => written += n,
++            Err(_) => break,
++        }
++    }
++    written
++}
++
++/// `OSStatus SSLRead(SSLContextRef, void *, size_t, size_t *)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `data` is writable for `length` bytes;
++/// `processed` is null or writable.
++pub unsafe extern "C" fn SSLRead(
++    ctx: CFTypeRef,
++    data: *mut c_void,
++    length: usize,
++    processed: *mut usize,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if !processed.is_null() {
++        // SAFETY: writable, per the caller.
++        unsafe { processed.write(0) };
++    }
++    if data.is_null() || length == 0 {
++        return PARAM;
++    }
++    // SAFETY: writable for `length`, per the caller.
++    let buffer = unsafe { std::slice::from_raw_parts_mut(data as *mut u8, length) };
++
++    let mut written = read_plaintext(connection, buffer);
++    if written == 0 {
++        let mut wire = [0u8; IO_BUFFER];
++        let read = match connection.io_read(&mut wire) {
++            Ok(read) => read,
++            Err(code) => return code,
++        };
++        if read == 0 {
++            return WOULD_BLOCK;
++        }
++        if let Err(code) = connection.feed(&wire[..read]) {
++            return code;
++        }
++        connection.drain_tls();
++        let status = connection.flush();
++        if status != OK {
++            return status;
++        }
++        written = read_plaintext(connection, buffer);
++    }
++
++    if !processed.is_null() {
++        // SAFETY: writable, per the caller.
++        unsafe { processed.write(written) };
++    }
++    if written == 0 {
++        WOULD_BLOCK
++    } else {
++        OK
++    }
++}
++
++/// `OSStatus SSLWrite(SSLContextRef, const void *, size_t, size_t *)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `data` is readable for `length` bytes;
++/// `processed` is null or writable.
++pub unsafe extern "C" fn SSLWrite(
++    ctx: CFTypeRef,
++    data: *const c_void,
++    length: usize,
++    processed: *mut usize,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if !processed.is_null() {
++        // SAFETY: writable, per the caller.
++        unsafe { processed.write(0) };
++    }
++    let Some(tls) = connection.tls.as_mut() else {
++        return PROTOCOL;
++    };
++    if data.is_null() || length == 0 {
++        return PARAM;
++    }
++    // SAFETY: readable for `length`, per the caller.
++    let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, length) };
++
++    let mut written = 0;
++    while written < bytes.len() {
++        match tls.writer().write(&bytes[written..]) {
++            Ok(0) => break,
++            Ok(n) => written += n,
++            Err(_) => return CRYPTO,
++        }
++    }
++    connection.drain_tls();
++    let status = connection.flush();
++    if status != OK {
++        return status;
++    }
++
++    if !processed.is_null() {
++        // SAFETY: writable, per the caller.
++        unsafe { processed.write(written) };
++    }
++    if written == bytes.len() {
++        OK
++    } else {
++        WOULD_BLOCK
++    }
++}
++
++/// `OSStatus SSLClose(SSLContextRef)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context.
++pub unsafe extern "C" fn SSLClose(ctx: CFTypeRef) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if let Some(tls) = connection.tls.as_mut() {
++        tls.send_close_notify();
++    }
++    connection.drain_tls();
++    let _ = connection.flush();
++    OK
++}
++
++/// `OSStatus SSLGetSessionState(SSLContextRef, SSLSessionState *)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `state` is null or writable.
++pub unsafe extern "C" fn SSLGetSessionState(ctx: CFTypeRef, state: *mut i32) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if !state.is_null() {
++        let value = match connection.tls.as_ref() {
++            None => STATE_IDLE,
++            Some(tls) if tls.is_handshaking() => STATE_HANDSHAKE,
++            Some(_) => STATE_CONNECTED,
++        };
++        // SAFETY: writable, per the caller.
++        unsafe { state.write(value) };
++    }
++    OK
++}
++
++exports::exports! {
++    functions {
++        "SSLCreateContext" => SSLCreateContext,
++        "SSLSetIOFuncs" => SSLSetIOFuncs,
++        "SSLSetConnection" => SSLSetConnection,
++        "SSLSetPeerDomainName" => SSLSetPeerDomainName,
++        "SSLSetProtocolVersionMin" => SSLSetProtocolVersionMin,
++        "SSLSetSessionOption" => SSLSetSessionOption,
++        "SSLHandshake" => SSLHandshake,
++        "SSLRead" => SSLRead,
++        "SSLWrite" => SSLWrite,
++        "SSLClose" => SSLClose,
++        "SSLGetSessionState" => SSLGetSessionState,
++    }
++}

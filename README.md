@@ -26,13 +26,20 @@ games, bypassing anti-cheat, or breaking Roblox's Terms of Service.
 | --- | --- |
 | Installer | Works |
 | **Vanilla Roblox** (`opinuxware-roblox-vanilla`) | **Works** |
-| Opiumware executor (`opinuxware-roblox`) | **Not yet** |
-| Opiumware UI (`opinuxware`) | **Not yet** |
+| Opiumware executor (`opinuxware-roblox`) | **Works with the Rosemary patch below** |
+| Opiumware UI (`opinuxware`) | Not yet |
+
+Booted Roblox with the executor loaded (`libOpiumware.dylib`) for 60+ seconds,
+serving Luau and reaching Roblox's servers, with **zero unbound-import crashes**.
+That needs a patched Rosemary: the stock 0.5.0 release has none of the Security
+APIs the executor calls. See [Rosemary patch](#rosemary-patch).
 
 Vanilla play uses a pristine `RobloxVanilla.app`. The executor uses a separately
-patched `Roblox.app` that loads `libOpiumware.dylib`. The installer side is
-complete; the executor is blocked on macOS APIs that Rosemary does not implement
-yet (Security/SecureTransport), not on anything in this repository.
+patched `Roblox.app` that loads `libOpiumware.dylib`. The UI app still lacks a
+few AppKit/QuartzCore classes and is not expected to render yet.
+
+The automatic launch at the end of installation starts the executor when you pass
+`--rosemary` with a patched build, and vanilla Roblox otherwise.
 
 ## Requirements
 
@@ -66,8 +73,8 @@ Set a checksum to an empty value to skip that check.
 
 ```sh
 opinuxware                    # Opiumware UI (not working yet)
-opinuxware-roblox             # Roblox + Opiumware (not working yet)
-opinuxware-roblox-vanilla     # unmodified Roblox (works)
+opinuxware-roblox             # Roblox + Opiumware (needs a patched Rosemary)
+opinuxware-roblox-vanilla     # unmodified Roblox (works on stock Rosemary)
 ```
 
 If `~/.local/bin` is not in `PATH`, use the full paths under
@@ -122,34 +129,38 @@ Rosemary does not implement, so the installer adds the load command itself
 - **Not used** by `opinuxware-roblox-vanilla`; that app is a pristine copy.
 - Applied automatically on install; nothing for you to do.
 
-### 2. Rosemary source patch — optional, not applied by the installer
+### 2. Rosemary source patches — needed for the executor
 
-[`patches/rosemary-objc-classlist.patch`](patches/rosemary-objc-classlist.patch)
-fixes a Rosemary bug: `objc_getClassList` and `objc_copyClassList` are
-implemented, but never registered in the loader's `RUNTIME` table
-(`crates/rosemary/src/objc/dispatch.rs`), so guest imports do not bind.
+These are **not applied by the installer**. They are for the Rosemary runtime,
+which has to be built and passed with `--rosemary`.
 
-- **Not needed** for vanilla Roblox.
-- **Required to get past the first executor crash**, but **not sufficient**:
-  with the patch applied, `opinuxware-roblox` still crashes at
-  `_SecPolicyCreateSSL` inside `libOpiumware.dylib`.
-- Therefore it **does not make Opiumware work today**. It is an upstream fix
-  worth sending to Rosemary.
+| Patch | What it fixes | Needed? |
+| --- | --- | --- |
+| `patches/rosemary-executor-apis.patch` | Every macOS API the executor imports: SecureTransport (`SSL*`), `SecPolicyCreateSSL`/`SecTrustEvaluateWithError`, CoreVideo Metal textures, `CATransaction`, Accessibility, `CFErrorCreate`, `NSImageName*`, and more | **Yes**, for `opinuxware-roblox` |
+| `patches/rosemary-objc-classlist.patch` | `objc_getClassList` / `objc_copyClassList` never registered in the loader table | Contained in the patch above; use alone only if you want that fix on its own |
 
-Apply it only if you are working on Rosemary itself:
+Both apply to Rosemary `main` (verified on 2026-11-05) and keep Rosemary's own
+tests green.
 
 ```sh
 git clone https://github.com/microlift/rosemary
-git -C rosemary apply "$PWD/patches/rosemary-objc-classlist.patch"
+git -C rosemary apply "$PWD/patches/rosemary-executor-apis.patch"
 nix build path:rosemary
 ./install.sh --rosemary "$(pwd)/result/bin/rosemary"
 ```
 
-The remaining executor blocker is Rosemary's missing SecureTransport `SSL*`
-stack (`SSLCreateContext`, `SSLHandshake`, `SSLRead`, `SSLWrite`, …) plus
-`SecTrust`/`SecPolicy`, Accessibility, CoreVideo Metal and QuartzCore APIs. That
-is a runtime feature project, not an installer change. Stubbing certificate
-verification would be unsafe and is not done here.
+Without Nix, use `cargo build --release --bin rosemary` inside the Rosemary
+checkout and pass `rosemary/target/release/rosemary`.
+
+Note that this is **our** patch work, not an upstream release. Re-check it when
+Rosemary `main` moves; if upstream lands the same APIs, drop the patch.
+
+The Opiumware UI still needs `NSUserNotification*`, `NSAppleScript`,
+`SystemConfiguration` dynamic-store keys and a few SSL getters. That is the next
+runtime gap, and it does not affect the executor.
+
+Stubbing certificate verification was not done: the SecureTransport shim
+verifies chains and hostnames with Rustls, and refuses unverified connections.
 
 ## Why Rosemary, not Darling
 
