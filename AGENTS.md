@@ -85,20 +85,20 @@ launchers export `ROSEMARY_PREFIX` and `ROSEMARY_PREFIX_HOME=prefix`.
 
 ## Installer flow
 
-1. `parse_args` — flags and env overrides.
-2. `preflight` — OS/arch/dependency checks; creates a temp dir **inside the
+1. `parse_args`: flags and env overrides.
+2. `preflight`: OS/arch/dependency checks; creates a temp dir **inside the
    install dir** (avoids noexec `/tmp`).
-3. `resolve_rosemary` — custom path → installed AppImage → system `rosemary` →
+3. `resolve_rosemary`: custom path → installed AppImage → system `rosemary` →
    download a pinned AppImage release and extract it with
    `--appimage-extract`. Extraction needs no FUSE.
-4. `ensure_prefix` — `rosemary prefix create` unless the prefix exists.
-5. `remove_old_install` / `install_roblox` — fresh Roblox into
+4. `ensure_prefix`: `rosemary prefix create` unless the prefix exists.
+5. `remove_old_install` / `install_roblox`: fresh Roblox into
    `<prefix>/root/Applications`, plus a pristine `RobloxVanilla.app` copy before
    any patching.
-6. `install_dylib` + `patch_roblox` — patch `libmimalloc.3.dylib`.
-7. `install_ui`, `install_modules` — UI app and guest `~/Opiumware`.
-8. `write_launchers` — wrapper scripts, `~/.local/bin` links, `.desktop` files.
-9. `launch_apps` — only when a display is present and `--no-launch` was not used.
+6. `install_dylib` + `patch_roblox`: patch `libmimalloc.3.dylib`.
+7. `install_ui`, `install_modules`: UI app and guest `~/Opiumware`.
+8. `write_launchers`: wrapper scripts, `~/.local/bin` links, `.desktop` files.
+9. `launch_apps`: only when a display is present and `--no-launch` was not used.
 
 `--uninstall` runs before `preflight` on purpose: it must work even if `curl`
 or the architecture requirements are not available.
@@ -140,7 +140,7 @@ It is **not** applied by the installer; it patches Rosemary itself.
   path is already inside it, nothing is replaced (it is read-only in the store).
   Later runs pick it up automatically. `resolve_rosemary` normalises the
   remembered path to the executable (`bin/rosemary` inside a build directory),
-  and the launchers always exec that file — never a directory. Without it,
+  and the launchers always exec that file, never a directory. Without it,
   installation starts vanilla Roblox.
 
 Rebase procedure: `git clone` Rosemary, `git apply` the patch, `nix build
@@ -209,7 +209,7 @@ Real runtime checks require a graphical session:
 
 Vanilla shows the Roblox window. The executor reaches Luau execution and
 Roblox's HTTP/WebSocket servers; a fault that names a missing import is a
-Rosemary gap, not an installer failure — record it in the README status.
+Rosemary gap, not an installer failure. Record it in the README status.
 
 For the UI, two cheap checks catch most regressions. First, `rosemary --analyze`
 on its Mach-O must print `0 unbound`. Second, run it with
@@ -221,9 +221,9 @@ or a missing API shows up as a `CONSOLE JS ERROR` line within seconds.
 
 At the top of `install.sh`:
 
-- `ROSEMARY_VERSION` — pinned Rosemary release (`0.5.0`). Bump when a newer
+- `ROSEMARY_VERSION`: pinned Rosemary release (`0.5.0`). Bump when a newer
   release fixes the symbols Opiumware needs.
-- `ROBLOX_VERSION` — pinned macOS Intel client. Bump when the CDN drops the old
+- `ROBLOX_VERSION`: pinned macOS Intel client. Bump when the CDN drops the old
   build or when Opiumware targets a newer one.
 - The three `*.ufs.sh` URLs are the Opiumware payload (library, resources, UI).
 - `ROBLOX_SHA256`, `DYLIB_SHA256`, `RESOURCES_SHA256`, `UI_SHA256` and
@@ -239,8 +239,8 @@ When bumping Rosemary, re-check the AppImage asset name
 
 ## Current compatibility state (as of 2026-11)
 
-Vanilla Roblox — `opinuxware-roblox-vanilla` running the pristine
-`RobloxVanilla.app` — works on stock Rosemary 0.5.0.
+Vanilla Roblox (the `opinuxware-roblox-vanilla` launcher, pristine
+`RobloxVanilla.app`) works on stock Rosemary 0.5.0.
 
 The executor (`opinuxware-roblox`, `Roblox.app` + `libOpiumware.dylib`) works
 when Rosemary is built with `patches/rosemary-executor-apis.patch`:
@@ -255,16 +255,16 @@ window comes up, the async Tauri frontend runs, and the run needs no special
 environment. Every import of `Opiumware`'s Mach-O resolves, `___objc_personality_v0`
 included.
 
-In the patch, in a nutshell:
+The patch adds:
 
-1. `crates/security/src/securetransport.rs` — SecureTransport `SSL*` over
+1. `crates/security/src/securetransport.rs`: SecureTransport `SSL*` over
    Rustls, with real chain + hostname verification, host callback pumping, and
    `errSSLWouldBlock`. Never disables verification.
-2. `crates/security/src/trust.rs` — `SecPolicyCreateSSL`,
+2. `crates/security/src/trust.rs`: `SecPolicyCreateSSL`,
    `SecTrustEvaluateWithError`, `SecTrustSetOCSPResponse`,
    `SecTrustSetNetworkFetchAllowed`, `SecTrustSetAnchorCertificates` (refuses to
    replace anchors), plus chain getters.
-3. `crates/rosemary/src/objc/dispatch.rs` — `objc_getClassList` /
+3. `crates/rosemary/src/objc/dispatch.rs`: `objc_getClassList` /
    `objc_copyClassList` loader entries (supersedes
    `patches/rosemary-objc-classlist.patch`).
 4. CoreVideo Metal texture cache, `CATransaction`, Accessibility
@@ -285,19 +285,19 @@ In the patch, in a nutshell:
    `WKWebView -URL` reporting the `tauri://` scheme for pages served from a
    bundle's `_up_` directory so Tauri's IPC scope accepts the window.
 
-## Opiumware UI: works; how it got here, and what to test on a change
+## Opiumware UI
 
 The UI is a Tauri 1.8 app (Rust + WKWebView). With the patch it starts: a real
 window, the custom-protocol task machinery that serves `tauri://`, and the
 Tauri frontend. Verified with a plain run: 70+ seconds, no faults, no
 unrecognized selectors (with and without `ROSEMARY_LOG_UNRECOGNIZED`).
 
-How it was made to start — the previous "dies at Opiumware+0x324896, a tail
+How it was made to start: the earlier "dies at Opiumware+0x324896, a tail
 call inside wry's msg_send wrapper with rsi = 0" was a misdiagnosis. That
 address is `movq (%rdx), %rsi` in `cocoa_foundation`'s `NSFastIterator::next`,
 a **null dereference of `state.mutations`**, not an unwinder/`@catch` problem:
 
-1. `dictionary_enumerate` (and only it — the array/set/enumerator versions
+1. `dictionary_enumerate` (and only it; the array/set/enumerator versions
    already did) returned `0` for an empty or exhausted dictionary *without*
    filling `state`. cocoa_foundation reads `state.mutations` after *every*
    refill, empty answer included, so an empty `__NSCFDictionary` crashed the
@@ -313,7 +313,7 @@ a **null dereference of `state.mutations`**, not an unwinder/`@catch` problem:
 4. The real `@try`/`@catch` gap: an image that links **no C++ runtime** (the UI
    does not link libc++, Roblox does) imports `___objc_personality_v0` as data,
    and `publish_personality` recorded the routine's address but never wrote the
-   slot — so the last import stayed unbound and any unwind through an
+   slot, so the last import stayed unbound and any unwind through an
    exceptions table would have jumped to zero. `publish_personality` now writes
    every `___objc_personality_v0` slot, like `publish_root_record` does for
    `_OBJC_EHTYPE_id`.
@@ -343,7 +343,7 @@ Findings that still matter:
   personality via `bind`; C++-less images now get it via `publish_personality`.
 - `_OBJC_EHTYPE_id` must carry the **real** `libc++abi` type_info vtable word;
   a standalone copy never matches what the guest compares against. That was
-  tried and reverted as insufficient — kept that way.
+  tried and reverted as insufficient; kept that way.
 - Debug scaffolding used while chasing it (a trace in `objc/src/msg.rs`, unwind
   tracing, an early return in `cxxlib.rs`) has been removed. Do not land it.
 

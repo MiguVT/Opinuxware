@@ -89,9 +89,9 @@ Scripts (autoexec, workspaces, themes) live in the guest home:
 
 | What | Host path | Guest path |
 | --- | --- | --- |
-| Install | `~/.local/share/opinuxware` | – |
-| Patched Rosemary | `.../opinuxware/rosemary-patched/rosemary` | – |
-| Bundled Rosemary | `.../opinuxware/rosemary` | – |
+| Install | `~/.local/share/opinuxware` | - |
+| Patched Rosemary | `.../opinuxware/rosemary-patched/rosemary` | - |
+| Bundled Rosemary | `.../opinuxware/rosemary` | - |
 | Roblox (patched) | `.../prefix/root/Applications/Roblox.app` | `/Applications/Roblox.app` |
 | Roblox (vanilla) | `.../prefix/root/Applications/RobloxVanilla.app` | `/Applications/RobloxVanilla.app` |
 | Opiumware UI | `.../prefix/root/Applications/Opiumware.app` | `/Applications/Opiumware.app` |
@@ -159,10 +159,10 @@ always exec `.../rosemary-patched/rosemary/bin/rosemary`.
 Without Nix, `cargo build --release --bin rosemary` inside the checkout works
 too; pass `rosemary/target/release/rosemary`.
 
-Two notes. This is our patch work, not an upstream release: re-check it when
-Rosemary `main` moves, and drop it if upstream lands the same APIs. And the
-patch does not weaken TLS or certificate checking: the SecureTransport shim
-verifies chains and hostnames with Rustls and refuses unverified connections.
+This is our patch work, not an upstream release: re-check it when Rosemary
+`main` moves, and drop it if upstream lands the same APIs. It also does not
+weaken TLS or certificate checking: the SecureTransport shim verifies chains
+and hostnames with Rustls and refuses unverified connections.
 
 The full story on the fixes, dead ends included, lives in `AGENTS.md`.
 
@@ -228,10 +228,10 @@ terms; they are not redistributed here.
 
 ## Credits
 
-- **Opiumware** — original macOS executor by [@norbyv1](https://gitlab.com/norbyv1)
-- **[Rosemary](https://github.com/microlift/rosemary)** — macOS compatibility
+- **Opiumware**: original macOS executor by [@norbyv1](https://gitlab.com/norbyv1)
+- **[Rosemary](https://github.com/microlift/rosemary)**: macOS compatibility
   layer and x86-64 emulator by the Microlift project (GPL-3.0)
-- **[MiniDarwin](https://github.com/V3L0C1T13S/minidarwin)** — Darwin base used by
+- **[MiniDarwin](https://github.com/V3L0C1T13S/minidarwin)**: Darwin base used by
   Rosemary prefixes
 
 No Opiumware binaries are redistributed; they are downloaded from the URLs
