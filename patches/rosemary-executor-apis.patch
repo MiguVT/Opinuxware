@@ -3107,7 +3107,7 @@ index bf8b1f5..5cbaf6b 100644
  
          let preferences = corefoundation::base::abstract_class(c"WebPreferences", None);
 diff --git a/crates/webkit/src/web_view.rs b/crates/webkit/src/web_view.rs
-index f2d680e..03fa30b 100644
+index f2d680e..55628e1 100644
 --- a/crates/webkit/src/web_view.rs
 +++ b/crates/webkit/src/web_view.rs
 @@ -1477,6 +1477,10 @@ unsafe extern "C" fn load_request(receiver: Id, _sel: Sel, request: Id) -> Id {
@@ -3121,7 +3121,7 @@ index f2d680e..03fa30b 100644
      eprintln!("rosemary: webkit: loading {url}");
      let Some((engine, gtk)) = gtk_of(receiver) else {
          return std::ptr::null_mut();
-@@ -1485,12 +1489,208 @@ unsafe extern "C" fn load_request(receiver: Id, _sel: Sel, request: Id) -> Id {
+@@ -1485,12 +1489,226 @@ unsafe extern "C" fn load_request(receiver: Id, _sel: Sel, request: Id) -> Id {
          engine::warn_once("a request's method and headers are not sent; it is loaded as a GET");
      }
      let navigation = start_navigation(receiver);
@@ -3176,6 +3176,13 @@ index f2d680e..03fa30b 100644
 +    };
 +    match scheme_task_body(task) {
 +        Some(body) => {
++            if engine::tracing() {
++                let head = &body[..body.len().min(64)];
++                eprintln!(
++                    "rosemary: webkit: scheme {scheme} answered {} bytes, head {head:?}",
++                    body.len()
++                );
++            }
 +            let html = gtk::c_string(&body);
 +            let base = gtk::c_string(&servable_base(url));
 +            // SAFETY: the view's widget and two strings it copies.
@@ -3195,7 +3202,12 @@ index f2d680e..03fa30b 100644
 +/// What a handler answered a task with.
 +#[derive(Default, Clone)]
 +struct SchemeTask {
++    /// The bytes as first captured. See [`SchemeTask::kept`] for why a second
++    /// copy exists.
 +    body: Option<Vec<u8>>,
++    /// The bytes actually served: a copy made a moment later, in an
++    /// allocation the guest's request teardown has not been seen to touch.
++    kept: &'static [u8],
 +    status: Option<i64>,
 +    mime: Option<String>,
 +    /// The `NSURLRequest` the task was made for, retained.
@@ -3249,14 +3261,12 @@ index f2d680e..03fa30b 100644
 +
 +/// The body a handler answered `task` with.
 +fn scheme_task_body(task: Id) -> Option<String> {
-+    let entry = SCHEME_TASKS
++    SCHEME_TASKS
 +        .lock()
 +        .unwrap_or_else(|e| e.into_inner())
 +        .iter()
 +        .find(|(key, _)| *key == task as usize)
-+        .map(|(_, answer)| answer.clone());
-+    // SAFETY: an `NSData` the handler wrote, read through Foundation.
-+    entry.and_then(|answer| answer.body).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
++        .map(|(_, answer)| String::from_utf8_lossy(answer.kept).into_owned())
 +}
 +
 +/// Record what a handler answered, for the objects it answers on.
@@ -3270,8 +3280,16 @@ index f2d680e..03fa30b 100644
 +    if let Some((_, answer)) = tasks.iter_mut().find(|(key, _)| *key == task as usize) {
 +        answer.status = status.or(answer.status);
 +        answer.mime = mime.or(answer.mime.take());
-+        if body.is_some() {
-+            answer.body = body;
++        if let Some(bytes) = body {
++            // The guest's malloc zone and this process's allocator share the
++            // address space, and the zone can reuse a range of memory it freed
++            // while a borrow was live. wry's request teardown zeroed the first
++            // word of the recorded body before `didFinish` returned. The
++            // served copy is taken a moment later, into an allocation the
++            // teardown has not been seen to reuse; `body` is kept as well, for
++            // anything that asks the record's raw length.
++            answer.body = Some(bytes);
++            answer.kept = Box::leak(answer.body.clone().unwrap().into_boxed_slice());
 +        }
 +    }
 +}
@@ -3331,7 +3349,7 @@ index f2d680e..03fa30b 100644
  unsafe extern "C" fn can_go_back(receiver: Id, _sel: Sel) -> u8 {
      // SAFETY: the view's widget.
      gtk_of(receiver)
-@@ -1557,7 +1757,9 @@ unsafe extern "C" fn url(receiver: Id, _sel: Sel) -> Id {
+@@ -1557,7 +1775,9 @@ unsafe extern "C" fn url(receiver: Id, _sel: Sel) -> Id {
      if text.is_empty() {
          return std::ptr::null_mut();
      }
@@ -3342,7 +3360,7 @@ index f2d680e..03fa30b 100644
  }
  
  /// A JavaScript value as the Objective-C object WebKit bridges it to.
-@@ -1925,12 +2127,127 @@ unsafe extern "C" fn redo(receiver: Id, _sel: Sel, _sender: Id) {
+@@ -1925,12 +2145,127 @@ unsafe extern "C" fn redo(receiver: Id, _sel: Sel, _sender: Id) {
      editing(receiver, c"Redo");
  }
  

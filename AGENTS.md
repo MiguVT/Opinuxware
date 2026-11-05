@@ -329,6 +329,18 @@ a **null dereference of `state.mutations`**, not an unwinder/`@catch` problem:
    is Rosemary, in the nix store, so `bare_guest_executable` is not usable
    here). WebKitGTK still resolves the relative assets against the real
    `file:` base, so both the document origin and the load path are right.
+6. Corrupted page head: the page sometimes started with `E html>` and pushed
+   the layout down. The guest's malloc zone and this process's allocator share
+   the address space; a range the zone freed while the response `NSData` still
+   borrowed it could be handed to this runtime's copy, and the zone then
+   rewrote the first word of that region during the request teardown, between
+   `didReceiveData` and `didFinish`. That zeroed the first eight bytes of the
+   served HTML (the `<!DOCTYP` of `<!DOCTYPE html>`). Fix: `SchemeTask` keeps a
+   second copy, allocated a moment later, and `scheme_task_body` serves from
+   that one. Reading the body again from the `NSData` later is not safe (the
+   borrowed guest buffer may be freed), and keeping it in an anonymous `mmap`
+   made the teardown fault on `free` and abort the process, so the second heap
+   copy is the working answer.
 
 Findings that still matter:
 
