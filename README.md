@@ -89,6 +89,8 @@ Scripts (autoexec, workspaces, themes) live in the guest home:
 | What | Host path | Guest path |
 | --- | --- | --- |
 | Install | `~/.local/share/opinuxware` | – |
+| Patched Rosemary | `.../opinuxware/rosemary-patched/rosemary` | – |
+| Bundled Rosemary | `.../opinuxware/rosemary` | – |
 | Roblox (patched) | `.../prefix/root/Applications/Roblox.app` | `/Applications/Roblox.app` |
 | Roblox (vanilla) | `.../prefix/root/Applications/RobloxVanilla.app` | `/Applications/RobloxVanilla.app` |
 | Opiumware UI | `.../prefix/root/Applications/Opiumware.app` | `/Applications/Opiumware.app` |
@@ -145,9 +147,15 @@ tests green.
 ```sh
 git clone https://github.com/microlift/rosemary
 git -C rosemary apply "$PWD/patches/rosemary-executor-apis.patch"
-nix build path:rosemary
-./install.sh --rosemary "$(pwd)/result/bin/rosemary"
+nix build path:rosemary -o ~/.local/share/opinuxware/rosemary-patched/rosemary
+./install.sh --rosemary ~/.local/share/opinuxware/rosemary-patched/rosemary/bin/rosemary
 ```
+
+Build it at that exact path: `-o` also writes the Nix result symlink there, and it
+keeps the build alive in the store. `--rosemary` accepts a binary inside that
+directory and the installer reuses it on later runs. Once it is in place, plain
+`./install.sh` picks it up automatically and logs
+`Using previously installed patched Rosemary`.
 
 Without Nix, use `cargo build --release --bin rosemary` inside the Rosemary
 checkout and pass `rosemary/target/release/rosemary`.

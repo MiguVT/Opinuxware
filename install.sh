@@ -471,12 +471,16 @@ resolve_rosemary() {
         [ -x "$CUSTOM_ROSEMARY" ] || die "Rosemary is not executable: $CUSTOM_ROSEMARY"
         ROSEMARY="$(cd "$(dirname "$CUSTOM_ROSEMARY")" && pwd)/$(basename "$CUSTOM_ROSEMARY")"
         # Keep the patched build at a stable path, so later re-runs and the
-        # launchers use it instead of the bundled stock release.
-        mkdir -p "$INSTALL_DIR/rosemary-patched" || return 1
-        if [ "$installed" != "$ROSEMARY" ]; then
-            ln -sf "$ROSEMARY" "$installed" || return 1
-            ROSEMARY="$installed"
-        fi
+        # launchers use it instead of the bundled stock release. A path inside
+        # the store directory is already where it belongs.
+        case "$ROSEMARY" in
+            "$installed"|"$installed"/*) ;;
+            *)
+                mkdir -p "$INSTALL_DIR/rosemary-patched" || return 1
+                ln -sfn "$ROSEMARY" "$installed" || return 1
+                ROSEMARY="$installed"
+                ;;
+        esac
         ROSEMARY_PATCHED=1
         echo -e "${INFO} Using patched Rosemary at ${BOLD}$ROSEMARY${NC}"
         return

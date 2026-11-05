@@ -66,7 +66,8 @@ test that it runs the Roblox client. If someone proposes it, point at
 ├── bin/opinuxware                          # launcher for the UI
 ├── bin/opinuxware-roblox                   # launcher for Roblox + Opiumware
 ├── bin/opinuxware-roblox-vanilla           # launcher for unmodified Roblox
-├── rosemary/AppRun                         # extracted Rosemary AppImage
+├── rosemary/AppRun                         # extracted stock Rosemary AppImage
+├── rosemary-patched/rosemary               # patched build kept by --rosemary
 └── prefix/                                 # ROSEMARY_PREFIX
     └── root/
         ├── Applications/
@@ -133,9 +134,12 @@ It is **not** applied by the installer; it patches Rosemary itself.
 - `patches/rosemary-objc-classlist.patch` is the standalone
   `objc_getClassList` fix, already contained in the main patch. Keep it only as
   a minimal reproducer for upstream.
-- The installer treats any `--rosemary PATH` as patched, remembers it at
-  `<install>/rosemary-patched/rosemary`, and launches the executor from the
-  install. Without it, installation starts vanilla Roblox.
+- The installer treats any `--rosemary PATH` as patched and remembers it at
+  `<install>/rosemary-patched/rosemary`. That path is either a symlink to the
+  passed binary or a Nix result pointing at a build directory; if the passed
+  path is already inside it, nothing is replaced (it is read-only in the store).
+  Later runs pick it up automatically. Without it, installation starts vanilla
+  Roblox.
 
 Rebase procedure: `git clone` Rosemary, `git apply` the patch, `nix build
 path:.` (or Cargo), run `rosemary --analyze` on `libOpiumware.dylib`, expect
