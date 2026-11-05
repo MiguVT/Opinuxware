@@ -1,0 +1,6 @@
+# Nix build output
+/result
+
+# Installer scratch/logs
+/.tmp.*
+*.log

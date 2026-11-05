@@ -1,0 +1,23 @@
+diff --git a/crates/rosemary/src/objc/dispatch.rs b/crates/rosemary/src/objc/dispatch.rs
+index 4c5ccc7..468ff04 100644
+--- a/crates/rosemary/src/objc/dispatch.rs
++++ b/crates/rosemary/src/objc/dispatch.rs
+@@ -197,6 +197,10 @@ pub(super) static RUNTIME: &[Runtime] = &[
+     // `objc_storeWeak`'s *value* is the exception, and it is the ordinary one:
+     // a guest may legally weakly reference a class, and a class is the one
+     // pointer that means something different on each side.
++    // `objc_copyClassList` and `objc_getClassList` return the classes a guest
++    // enumerated. Classes are the runtime's own, so the pointers need no
++    // translation; the guest supplies (or receives) an ordinary buffer.
++    rt!("objc_copyClassList", P, P),
+     rt!("objc_copyClassNamesForImage", P, P, P),
+     // `void objc_copyStruct(void *dest, const void *src, ptrdiff_t size,
+     // BOOL atomic, BOOL hasStrong)` - a synthesized accessor of a struct-typed
+@@ -210,6 +214,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
+     // `object_getClass` of a class is its metaclass, so the argument is
+     // translated as well as the result.
+     rtc!([0] -> true, "objc_getClass", P, P),
++    rt!("objc_getClassList", I32, P, I32),
+     rtc!([] -> true, "objc_getMetaClass", P, P),
+     //
+     // A `@synthesize`d property does not compile to a load and a store. For
