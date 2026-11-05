@@ -26,17 +26,17 @@ games, bypassing anti-cheat, or breaking Roblox's Terms of Service.
 | --- | --- |
 | Installer | Works |
 | **Vanilla Roblox** (`opinuxware-roblox-vanilla`) | **Works** |
-| Opiumware executor (`opinuxware-roblox`) | **Works with the Rosemary patch below** |
-| Opiumware UI (`opinuxware`) | Not yet |
+| **Opiumware executor** (`opinuxware-roblox`) | **Works with the Rosemary patch** |
+| Opiumware UI (`opinuxware`) | **In progress** (window and frontend run; still crashes) |
 
 Booted Roblox with the executor loaded (`libOpiumware.dylib`) for 60+ seconds,
 serving Luau and reaching Roblox's servers, with **zero unbound-import crashes**.
 That needs a patched Rosemary: the stock 0.5.0 release has none of the Security
-APIs the executor calls. See [Rosemary patch](#rosemary-patch).
+APIs the executor calls. See [Rosemary source patches](#2-rosemary-source-patches--needed-for-the-executor).
 
 Vanilla play uses a pristine `RobloxVanilla.app`. The executor uses a separately
-patched `Roblox.app` that loads `libOpiumware.dylib`. The UI app still lacks a
-few AppKit/QuartzCore classes and is not expected to render yet.
+patched `Roblox.app` that loads `libOpiumware.dylib`. The Opiumware UI is a Tauri
+app and is not expected to start yet; see Known limitations.
 
 The automatic launch at the end of installation starts the executor when you pass
 `--rosemary` with a patched build, and vanilla Roblox otherwise.
@@ -72,7 +72,7 @@ Set a checksum to an empty value to skip that check.
 ## Usage
 
 ```sh
-opinuxware                    # Opiumware UI (not working yet)
+opinuxware                    # Opiumware UI (in progress, does not start yet)
 opinuxware-roblox             # Roblox + Opiumware (needs a patched Rosemary)
 opinuxware-roblox-vanilla     # unmodified Roblox (works on stock Rosemary)
 ```
@@ -132,7 +132,6 @@ Rosemary does not implement, so the installer adds the load command itself
 - Applied automatically on install; nothing for you to do.
 
 ### 2. Rosemary source patches — needed for the executor
-
 These are **not applied by the installer**. They are for the Rosemary runtime,
 which has to be built and passed with `--rosemary`.
 
@@ -163,9 +162,12 @@ checkout and pass `rosemary/target/release/rosemary`.
 Note that this is **our** patch work, not an upstream release. Re-check it when
 Rosemary `main` moves; if upstream lands the same APIs, drop the patch.
 
-The Opiumware UI still needs `NSUserNotification*`, `NSAppleScript`,
-`SystemConfiguration` dynamic-store keys and a few SSL getters. That is the next
-runtime gap, and it does not affect the executor.
+The Opiumware UI is further along but **does not start yet**. The patch already
+gives it every macOS API it imports except `___objc_personality_v0`, and the
+window plus Tauri frontend do come up. It then crashes inside Tauri's `wry`
+layer, which needs a working guest `@try`/`@catch`; nothing is thrown, so the
+failure is a Rust panic recovered through a path this runtime does not yet
+provide. That is the next piece of work, and it does not affect the executor.
 
 Stubbing certificate verification was not done: the SecureTransport shim
 verifies chains and hostnames with Rustls, and refuses unverified connections.

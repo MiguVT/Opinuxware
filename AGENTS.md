@@ -260,14 +260,38 @@ What the patch adds, roughly:
    `CGEventCreateScrollWheelEvent`/`SetLocation`/`SetDoubleValueField`,
    `NSApplicationDidHide/UnhideNotification`, `NSImageName*`, `CGWindow*` keys,
    `kCVMetalTextureUsage`, `___NSDictionary0__struct`.
+5. WebKit/Tauri support: `NSTextInputClient` protocol, `NSTextInputContext
+   initWithClient:`, `WKWebViewConfiguration setURLSchemeHandler:forURLScheme:`
+   plus `urlSchemeHandlerForURLScheme:`, `WKURLSchemeTask`, `loadHTMLString:baseURL:`,
+   `-HTTPBodyStream`, `NSAppleScript`/`NSUserNotification*` classes, and the
+   SystemConfiguration dynamic store.
 
-Still not run: the Opiumware UI. Its 33 remaining imports are `NSUserNotification*`,
-`NSAppleScript`, `SystemConfiguration` dynamic-store keys, `fclonefileat`,
-`__objc_personality_v0`, class-pair/ivar metadata calls, and a few SSL getters.
-That is the next gap, and it does not affect the executor.
+## Opiumware UI: in progress, do not regress the executor for it
+
+The UI is a Tauri 1.8 app (Rust + WKWebView). With the patch:
+
+- every import resolves except `___objc_personality_v0`;
+- a real window is created and the Tauri frontend scripts run;
+- it then dies at `Opiumware+0x324896`, a tail call inside wry's `msg_send`
+  wrapper with `rsi = 0`, with **no unwinder activity at all**.
+
+Findings that matter for whoever picks this up:
+
+- wry does not register a URL scheme handler on macOS (`setURLSchemeHandler:` is
+  inside a `#[cfg(windows)]` block in wry 0.24), so Tauri serves the frontend
+  through its own mechanism. Do not assume our task/handler path is what runs.
+- `objc_exception::try` is a C shim (`RustObjCExceptionTryCatch`) that wraps a
+  closure in `@try`/`@catch`. A correct fix has to give that path a working
+  catch, not just an `_OBJC_EHTYPE_id` binding.
+- `_OBJC_EHTYPE_id` must carry the **real** `libc++abi` type_info vtable word;
+  a standalone copy never matches what the guest compares against. That was
+  tried and reverted as insufficient.
+- Debug scaffolding used while chasing it (a trace in `objc/src/msg.rs`, unwind
+  tracing, an early return in `cxxlib.rs`) has been removed. Do not land it.
 
 Do not "fix" executor gaps by stubbing certificate verification or the TLS
 stack. Keep the patch rebasable against Rosemary `main`, and drop it if upstream
 lands the same APIs. Re-check imports with
-`rosemary --analyze <host path to libOpiumware.dylib>`.
+`rosemary --analyze <host path to libOpiumware.dylib>` (executor) and
+`.../Opiumware.app/Contents/MacOS/Opiumware` (UI).
 
