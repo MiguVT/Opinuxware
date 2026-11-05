@@ -209,9 +209,13 @@ Real runtime checks require a graphical session:
 
 Vanilla shows the Roblox window. The executor reaches Luau execution and
 Roblox's HTTP/WebSocket servers; a fault that names a missing import is a
-Rosemary gap, not an installer failure — record it in the README status. The UI
-comes up with the Tauri frontend; `rosemary --analyze` on its Mach-O must print
-`0 unbound`.
+Rosemary gap, not an installer failure — record it in the README status.
+
+For the UI, two cheap checks catch most regressions. First, `rosemary --analyze`
+on its Mach-O must print `0 unbound`. Second, run it with
+`ROSEMARY_TRACE_WEBKIT=1` and confirm the log has no unhandled promise
+rejections: the frontend fires a Tauri command at boot, so a broken IPC scope
+or a missing API shows up as a `CONSOLE JS ERROR` line within seconds.
 
 ## Version pins
 
@@ -251,7 +255,7 @@ window comes up, the async Tauri frontend runs, and the run needs no special
 environment. Every import of `Opiumware`'s Mach-O resolves, `___objc_personality_v0`
 included.
 
-What the patch adds, roughly:
+In the patch, in a nutshell:
 
 1. `crates/security/src/securetransport.rs` — SecureTransport `SSL*` over
    Rustls, with real chain + hostname verification, host callback pumping, and

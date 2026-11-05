@@ -699,7 +699,7 @@ index bcd471b..da3c4e5 100644
      uti,
  }
 diff --git a/crates/coreservices/src/process.rs b/crates/coreservices/src/process.rs
-index 4e6220e..59e05ea 100644
+index 4e6220e..eda1a82 100644
 --- a/crates/coreservices/src/process.rs
 +++ b/crates/coreservices/src/process.rs
 @@ -210,9 +210,35 @@ pub unsafe extern "C" fn CSCopyMachineName() -> *mut c_void {
@@ -738,16 +738,6 @@ index 4e6220e..59e05ea 100644
          "GetCurrentProcess" => GetCurrentProcess,
          "GetFrontProcess" => GetFrontProcess,
          "SameProcess" => SameProcess,
-@@ -226,8 +252,7 @@ exports::exports! {
- }
- 
- #[cfg(test)]
--mod tests {
--    use super::*;
-+mod tests {    use super::*;
- 
-     /// The number a program gets back is `kCurrentProcess`, and it compares
-     /// equal to itself - which is the whole of what a caller does with it.
 diff --git a/crates/coreservices/src/systemconfig.rs b/crates/coreservices/src/systemconfig.rs
 new file mode 100644
 index 0000000..fda9012
@@ -1205,10 +1195,10 @@ index b95cba0..f72c528 100644
      if batch == 0 {
          return 0;
 diff --git a/crates/foundation/src/lib.rs b/crates/foundation/src/lib.rs
-index f98f9db..4661b77 100644
+index f98f9db..7fe72a2 100644
 --- a/crates/foundation/src/lib.rs
 +++ b/crates/foundation/src/lib.rs
-@@ -206,17 +206,23 @@ unsafe fn send_scalar<T>(receiver: objc::object::Id, name: &str) -> Option<T> {
+@@ -206,6 +206,12 @@ unsafe fn send_scalar<T>(receiver: objc::object::Id, name: &str) -> Option<T> {
      Some(unsafe { f(receiver, sel) })
  }
  
@@ -1221,12 +1211,7 @@ index f98f9db..4661b77 100644
  /// The class objects this crate publishes as *data*, Mach-O spelling included.
  ///
  /// A guest's `[NSMutableArray array]` binds `_OBJC_CLASS_$_NSMutableArray` and
- /// sends to whatever it gets, so the address has to be the class itself.
--pub fn class_data() -> Vec<(String, u64)> {
--    bootstrap();
-+pub fn class_data() -> Vec<(String, u64)> {    bootstrap();
-     let mut out = Vec::new();
-     for name in CLASSES
+@@ -217,6 +223,7 @@ pub fn class_data() -> Vec<(String, u64)> {
          .iter()
          .chain(constant::CLASSES)
          .chain(urlsession::CLASSES)
@@ -1234,7 +1219,7 @@ index f98f9db..4661b77 100644
          .copied()
      {
          let Some(class) = std::ffi::CString::new(name)
-@@ -248,7 +254,18 @@ pub fn class_data() -> Vec<(String, u64)> {
+@@ -248,7 +255,18 @@ pub fn class_data() -> Vec<(String, u64)> {
  /// Only classes a guest in this tree has been seen to subclass. AppKit's -
  /// `NSView`, `NSWindow`, `NSApplication` - belong to AppKit and arrive with it.
  fn declare_abstract() {
@@ -1254,7 +1239,7 @@ index f98f9db..4661b77 100644
          corefoundation::base::abstract_class(name, None);
      }
  }
-@@ -329,6 +346,12 @@ pub const CLASSES: &[&str] = &[
+@@ -329,6 +347,12 @@ pub const CLASSES: &[&str] = &[
  ///
  /// A key global is a **variable** holding an `NSString *`, not the string, so
  /// each goes through a cell - see `corefoundation::base::global_cell`.
@@ -1267,7 +1252,7 @@ index f98f9db..4661b77 100644
  pub fn data_symbols() -> Vec<(String, u64)> {
      let mut out = class_data();
      for table in [
-@@ -337,6 +360,9 @@ pub fn data_symbols() -> Vec<(String, u64)> {
+@@ -337,6 +361,9 @@ pub fn data_symbols() -> Vec<(String, u64)> {
          kvo::KEYS,
          decimal::KEYS,
          proxy::KEYS,

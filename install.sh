@@ -200,9 +200,9 @@ Environment:
 
 Files:
   Install dir          ${INSTALL_DIR}
-  Roblox               ${APPS_DIR}/Roblox.app   (guest: /Applications/Roblox.app)
-  Roblox (vanilla)     ${APPS_DIR}/RobloxVanilla.app (guest: /Applications/RobloxVanilla.app)
-  Opiumware UI         ${APPS_DIR}/Opiumware.app (guest: /Applications/Opiumware.app)
+  Roblox               ${APPS_DIR}/Roblox.app         (guest: /Applications/Roblox.app)
+  Roblox (vanilla)     ${APPS_DIR}/RobloxVanilla.app  (guest: /Applications/RobloxVanilla.app)
+  Opiumware UI         ${APPS_DIR}/Opiumware.app      (guest: /Applications/Opiumware.app)
   Opiumware data       <prefix>/root/Users/\$USER/Opiumware (also ~/Opiumware)
 EOF
 }
