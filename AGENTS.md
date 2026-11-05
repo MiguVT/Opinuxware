@@ -201,14 +201,15 @@ Real runtime checks require a graphical session:
 
 ```sh
 ~/.local/share/opinuxware/bin/opinuxware-roblox-vanilla   # should stay open
-~/.local/share/opinuxware/bin/opinuxware-roblox           # executor; currently crashes
-~/.local/share/opinuxware/bin/opinuxware                  # UI; currently crashes
+~/.local/share/opinuxware/bin/opinuxware-roblox           # executor; should reach Luau + Roblox servers
+~/.local/share/opinuxware/bin/opinuxware                  # UI; should show the window and frontend
 ```
 
-Vanilla should show the Roblox window. The executor should reach
-`_SecPolicyCreateSSL`; the UI reaches its AppKit gaps. A fault that names a
-missing import is a Rosemary gap, not an installer failure — record it in the
-README status.
+Vanilla shows the Roblox window. The executor reaches Luau execution and
+Roblox's HTTP/WebSocket servers; a fault that names a missing import is a
+Rosemary gap, not an installer failure — record it in the README status. The UI
+comes up with the Tauri frontend; `rosemary --analyze` on its Mach-O must print
+`0 unbound`.
 
 ## Version pins
 
@@ -243,6 +244,11 @@ when Rosemary is built with `patches/rosemary-executor-apis.patch`:
   servers with zero "import nothing satisfied" faults. Before the patch it
   crashed within ~2 seconds.
 
+The Opiumware UI (`opinuxware`) also works on the same patched build: the real
+window comes up, the async Tauri frontend runs, and the run needs no special
+environment. Every import of `Opiumware`'s Mach-O resolves, `___objc_personality_v0`
+included.
+
 What the patch adds, roughly:
 
 1. `crates/security/src/securetransport.rs` — SecureTransport `SSL*` over
@@ -265,27 +271,59 @@ What the patch adds, roughly:
    plus `urlSchemeHandlerForURLScheme:`, `WKURLSchemeTask`, `loadHTMLString:baseURL:`,
    `-HTTPBodyStream`, `NSAppleScript`/`NSUserNotification*` classes, and the
    SystemConfiguration dynamic store.
+6. The Opiumware UI's own needs: `dictionary_enumerate` returning the mutation
+   guard on empty answers, `-[NSHTTPURLResponse initWithURL:statusCode:HTTPVersion:headerFields:]`
+   plus `corefoundation::boxed::place_contents`, `isMovableByWindowBackground`,
+   and `publish_personality` writing every `___objc_personality_v0` slot so
+   C++-less images resolve the last import and can unwind into a `@catch`.
 
-## Opiumware UI: in progress, do not regress the executor for it
+## Opiumware UI: works; how it got here, and what to test on a change
 
-The UI is a Tauri 1.8 app (Rust + WKWebView). With the patch:
+The UI is a Tauri 1.8 app (Rust + WKWebView). With the patch it starts: a real
+window, the custom-protocol task machinery that serves `tauri://`, and the
+Tauri frontend. Verified with a plain run: 70+ seconds, no faults, no
+unrecognized selectors (with and without `ROSEMARY_LOG_UNRECOGNIZED`).
 
-- every import resolves except `___objc_personality_v0`;
-- a real window is created and the Tauri frontend scripts run;
-- it then dies at `Opiumware+0x324896`, a tail call inside wry's `msg_send`
-  wrapper with `rsi = 0`, with **no unwinder activity at all**.
+How it was made to start — the previous "dies at Opiumware+0x324896, a tail
+call inside wry's msg_send wrapper with rsi = 0" was a misdiagnosis. That
+address is `movq (%rdx), %rsi` in `cocoa_foundation`'s `NSFastIterator::next`,
+a **null dereference of `state.mutations`**, not an unwinder/`@catch` problem:
 
-Findings that matter for whoever picks this up:
+1. `dictionary_enumerate` (and only it — the array/set/enumerator versions
+   already did) returned `0` for an empty or exhausted dictionary *without*
+   filling `state`. cocoa_foundation reads `state.mutations` after *every*
+   refill, empty answer included, so an empty `__NSCFDictionary` crashed the
+   guest. Fix: `dictionary_enumerate` hands out the `NEVER_MUTATED` guard (and
+   the caller's buffer as `items`) before the `batch == 0` early return.
+2. wry's custom-protocol machinery (`InnerWebView::new::start_task`) builds its
+   answer with `-[NSHTTPURLResponse initWithURL:statusCode:HTTPVersion:headerFields:]`,
+   which was unimplemented and aborted by name. Fix: implement it (plus a
+   dictionary-of-strings reader), filling the `Body<Response>` of a freshly
+   allocated object via the new `corefoundation::boxed::place_contents`.
+3. `-[TaoWindow isMovableByWindowBackground]` (an NSWindow property getter) was
+   missing; tao asks it during window setup. Returns the default (`NO`).
+4. The real `@try`/`@catch` gap: an image that links **no C++ runtime** (the UI
+   does not link libc++, Roblox does) imports `___objc_personality_v0` as data,
+   and `publish_personality` recorded the routine's address but never wrote the
+   slot — so the last import stayed unbound and any unwind through an
+   exceptions table would have jumped to zero. `publish_personality` now writes
+   every `___objc_personality_v0` slot, like `publish_root_record` does for
+   `_OBJC_EHTYPE_id`.
 
-- wry does not register a URL scheme handler on macOS (`setURLSchemeHandler:` is
-  inside a `#[cfg(windows)]` block in wry 0.24), so Tauri serves the frontend
-  through its own mechanism. Do not assume our task/handler path is what runs.
-- `objc_exception::try` is a C shim (`RustObjCExceptionTryCatch`) that wraps a
-  closure in `@try`/`@catch`. A correct fix has to give that path a working
-  catch, not just an `_OBJC_EHTYPE_id` binding.
+Findings that still matter:
+
+- The custom-scheme task path **is** what runs: the trace above was reached
+  through wry's own `start_task` closure, so the earlier note that "wry does
+  not register a URL scheme handler on macOS" is wrong for this wry version.
+  Do not remove or stub the scheme-task machinery (`serve_custom_scheme`,
+  `SCHEME_TASKS`) without re-checking that the frontend still loads.
+- `objc_exception::try` (`RustObjCExceptionTryCatch`) wraps a closure in
+  `@try`/`@catch`; for it to catch, the unwinder needs a live personality and a
+  matching `_OBJC_EHTYPE_id`. The executor's own C++ runtime supplies the
+  personality via `bind`; C++-less images now get it via `publish_personality`.
 - `_OBJC_EHTYPE_id` must carry the **real** `libc++abi` type_info vtable word;
   a standalone copy never matches what the guest compares against. That was
-  tried and reverted as insufficient.
+  tried and reverted as insufficient — kept that way.
 - Debug scaffolding used while chasing it (a trace in `objc/src/msg.rs`, unwind
   tracing, an early return in `cxxlib.rs`) has been removed. Do not land it.
 
@@ -293,5 +331,5 @@ Do not "fix" executor gaps by stubbing certificate verification or the TLS
 stack. Keep the patch rebasable against Rosemary `main`, and drop it if upstream
 lands the same APIs. Re-check imports with
 `rosemary --analyze <host path to libOpiumware.dylib>` (executor) and
-`.../Opiumware.app/Contents/MacOS/Opiumware` (UI).
+`.../Opiumware.app/Contents/MacOS/Opiumware` (UI); both print `0 unbound`.
 

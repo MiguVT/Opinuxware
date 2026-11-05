@@ -27,16 +27,20 @@ games, bypassing anti-cheat, or breaking Roblox's Terms of Service.
 | Installer | Works |
 | **Vanilla Roblox** (`opinuxware-roblox-vanilla`) | **Works** |
 | **Opiumware executor** (`opinuxware-roblox`) | **Works with the Rosemary patch** |
-| Opiumware UI (`opinuxware`) | **In progress** (window and frontend run; still crashes) |
+| Opiumware UI (`opinuxware`) | **Works with the Rosemary patch** |
 
 Booted Roblox with the executor loaded (`libOpiumware.dylib`) for 60+ seconds,
 serving Luau and reaching Roblox's servers, with **zero unbound-import crashes**.
 That needs a patched Rosemary: the stock 0.5.0 release has none of the Security
 APIs the executor calls. See [Rosemary source patches](#2-rosemary-source-patches--needed-for-the-executor).
 
+The Opiumware UI also starts with the patched Rosemary: a real window comes up
+and the Tauri frontend loads. That needs the custom-protocol task machinery
+wry uses to serve the frontend, plus the empty-dictionary fast-enumeration fix;
+see [Rosemary source patches](#2-rosemary-source-patches--needed-for-the-executor).
+
 Vanilla play uses a pristine `RobloxVanilla.app`. The executor uses a separately
-patched `Roblox.app` that loads `libOpiumware.dylib`. The Opiumware UI is a Tauri
-app and is not expected to start yet; see Known limitations.
+patched `Roblox.app` that loads `libOpiumware.dylib`.
 
 The automatic launch at the end of installation starts the executor when you pass
 `--rosemary` with a patched build, and vanilla Roblox otherwise.
@@ -72,7 +76,7 @@ Set a checksum to an empty value to skip that check.
 ## Usage
 
 ```sh
-opinuxware                    # Opiumware UI (in progress, does not start yet)
+opinuxware                    # Opiumware UI (needs a patched Rosemary)
 opinuxware-roblox             # Roblox + Opiumware (needs a patched Rosemary)
 opinuxware-roblox-vanilla     # unmodified Roblox (works on stock Rosemary)
 ```
@@ -137,7 +141,7 @@ which has to be built and passed with `--rosemary`.
 
 | Patch | What it fixes | Needed? |
 | --- | --- | --- |
-| `patches/rosemary-executor-apis.patch` | Every macOS API the executor imports: SecureTransport (`SSL*`), `SecPolicyCreateSSL`/`SecTrustEvaluateWithError`, CoreVideo Metal textures, `CATransaction`, Accessibility, `CFErrorCreate`, `NSImageName*`, and more | **Yes**, for `opinuxware-roblox` |
+| `patches/rosemary-executor-apis.patch` | Every macOS API the executor imports: SecureTransport (`SSL*`), `SecPolicyCreateSSL`/`SecTrustEvaluateWithError`, CoreVideo Metal textures, `CATransaction`, Accessibility, `CFErrorCreate`, `NSImageName*`, and more; plus what the Opiumware UI needs (an empty-dictionary fast-enumeration fix, `NSHTTPURLResponse initWithURL:...`, `isMovableByWindowBackground`, and publishing `___objc_personality_v0` into the slot for images that link no C++ runtime) | **Yes**, for `opinuxware-roblox` and `opinuxware` |
 | `patches/rosemary-objc-classlist.patch` | `objc_getClassList` / `objc_copyClassList` never registered in the loader table | Contained in the patch above; use alone only if you want that fix on its own |
 
 Both apply to Rosemary `main` (verified on 2026-11-05) and keep Rosemary's own
@@ -162,12 +166,25 @@ checkout and pass `rosemary/target/release/rosemary`.
 Note that this is **our** patch work, not an upstream release. Re-check it when
 Rosemary `main` moves; if upstream lands the same APIs, drop the patch.
 
-The Opiumware UI is further along but **does not start yet**. The patch already
-gives it every macOS API it imports except `___objc_personality_v0`, and the
-window plus Tauri frontend do come up. It then crashes inside Tauri's `wry`
-layer, which needs a working guest `@try`/`@catch`; nothing is thrown, so the
-failure is a Rust panic recovered through a path this runtime does not yet
-provide. That is the next piece of work, and it does not affect the executor.
+The Opiumware UI starts on the patched Rosemary. It runs the real custom-protocol
+machinery: wry registers a `WKURLSchemeHandler` for `tauri://`, this runtime's
+web view hands the task to it, and the handler's `NSHTTPURLResponse` initializer
+and every accessor are implemented. The behaviour was traced from two hard
+faults that looked like unwinder problems but were not:
+
+- cocoa_foundation's `NSFastIterator::next` dereferences `state.mutations`
+  after every refill, and `dictionary_enumerate` returned `0` for an empty
+  dictionary without filling `state` — so the guest crashed on a null pointer,
+  not on a missing `@catch`. `dictionary_enumerate` (and only it) now hands out
+  the mutation guard even for a zero-item answer.
+- `initWithURL:statusCode:HTTPVersion:headerFields:` was unimplemented (a named
+  abort, which no `@try`/`@catch` can turn into a catch here).
+
+The real `__try`/`__catch` gap was `___objc_personality_v0`'s slot: an image
+that links no C++ runtime (the UI does not link libc++) imports the name as
+data, and `publish_personality` recorded the routine but never wrote the slot.
+The UI's import list is now fully resolved (0 unbound), and the executor still
+runs 60 s with zero import faults.
 
 Stubbing certificate verification was not done: the SecureTransport shim
 verifies chains and hostnames with Rustls, and refuses unverified connections.

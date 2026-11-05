@@ -338,6 +338,72 @@ index 5fc5fda..950e4eb 100644
      out.push((
          "_NSAppKitVersionNumber".to_string(),
          corefoundation::base::global_cell("_NSAppKitVersionNumber", APPKIT_VERSION.to_bits()),
+diff --git a/crates/appkit/src/protocols.rs b/crates/appkit/src/protocols.rs
+new file mode 100644
+index 0000000..73d0470
+--- /dev/null
++++ b/crates/appkit/src/protocols.rs
+@@ -0,0 +1,44 @@
++//! The Objective-C protocols AppKit's classes declare they conform to.
++//!
++//! A guest that subclasses `NSView` asks for `NSTextInputClient` by name and
++//! adopts it (`tao`, which Roblox's executor links, does exactly this). The
++//! methods are this crate's; what this module adds is the protocol object that
++//! names them, so a guest's lookup succeeds.
++
++use std::ffi::CStr;
++
++/// The instance methods an `NSTextInputClient` must answer, as
++/// `(selector, type encoding)`.
++const TEXT_INPUT_CLIENT: &[(&str, &CStr)] = &[
++    ("insertText:replacementRange:", c"v40@0:8@16{_NSRange=QQ}24"),
++    ("doCommandBySelector:", c"v24@0:8:16"),
++    ("setMarkedText:selectedRange:replacementRange:", c"v56@0:8@16{_NSRange=QQ}24{_NSRange=QQ}40"),
++    ("unmarkText", c"v16@0:8"),
++    ("hasMarkedText", c"c16@0:8"),
++    ("markedRange", c"{_NSRange=QQ}16@0:8"),
++    ("selectedRange", c"{_NSRange=QQ}16@0:8"),
++    ("validAttributesForMarkedText", c"@16@0:8"),
++    ("attributedSubstringForProposedRange:actualRange:", c"@48@0:8{_NSRange=QQ}16^{_NSRange=QQ}32"),
++    ("firstRectForCharacterRange:actualRange:", c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{_NSRange=QQ}16^{_NSRange=QQ}32"),
++    ("characterIndexForPoint:", c"Q32@0:8{CGPoint=dd}16"),
++];
++
++/// Declare and register the protocols a guest may look up.
++pub fn install() {
++    let Some(protocol) = objc::protocol::allocate(c"NSTextInputClient") else {
++        return;
++    };
++    for (selector, types) in TEXT_INPUT_CLIENT {
++        // Optional in the real protocol for the last three; a guest only looks
++        // the method up when it means to call it.
++        let required = !matches!(
++            *selector,
++            "validAttributesForMarkedText"
++                | "attributedSubstringForProposedRange:actualRange:"
++                | "firstRectForCharacterRange:actualRange:"
++                | "characterIndexForPoint:"
++        );
++        protocol.add_method(objc::sel::get(selector), types, required, true);
++    }
++    objc::protocol::register(protocol);
++}
+diff --git a/crates/appkit/src/window.rs b/crates/appkit/src/window.rs
+index 05ca169..1ba0fd0 100644
+--- a/crates/appkit/src/window.rs
++++ b/crates/appkit/src/window.rs
+@@ -3891,6 +3891,11 @@ pub(crate) fn install() {
+         "showsToolbarButton" => shows_toolbar_button, c"c16@0:8";
+         "setMovable:" => set_movable, c"v20@0:8c16";
+         "isMovable" => is_movable, c"c16@0:8";
++        "setMovableByWindowBackground:" => ignored_flag, c"v20@0:8c16";
++        // The setter records nothing, so the answer is the default Real-macOS
++        // one: a window moves by its title bar, not by a drag on the
++        // background. tao asks this when setting up drag regions.
++        "isMovableByWindowBackground" => no, c"c16@0:8";
+         "performWindowDragWithEvent:" => perform_window_drag_with_event, c"v24@0:8@16";
+         "setIgnoresMouseEvents:" => ignored_flag, c"v20@0:8c16";
+         "collectionBehavior" => collection_behavior, c"Q16@0:8";
 diff --git a/crates/applicationservices/Cargo.toml b/crates/applicationservices/Cargo.toml
 index a633797..3f87632 100644
 --- a/crates/applicationservices/Cargo.toml
@@ -437,6 +503,36 @@ index 41f6e49..76f64c3 100644
  pub unsafe extern "C" fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex) -> CFTypeRef {
      let Some(a) = (unsafe { collections::array(array) }) else {
          return std::ptr::null();
+diff --git a/crates/corefoundation/src/boxed.rs b/crates/corefoundation/src/boxed.rs
+index 229f76b..d03df32 100644
+--- a/crates/corefoundation/src/boxed.rs
++++ b/crates/corefoundation/src/boxed.rs
+@@ -58,6 +58,25 @@ pub fn make<T>(class: &'static Class, contents: T) -> CFTypeRef {
+     body as CFTypeRef
+ }
+ 
++/// Fill the contents word of a live `Body<T>`, as an `-init` does to the
++/// object `alloc` returned.
++///
++/// # Safety
++///
++/// `object` is a live instance of the class [`register`] made for `T`; its
++/// contents word is null or a box this module's allocator made (a fresh
++/// `class_createInstance` is zeroed, so a single `-init` finds null).
++pub unsafe fn place_contents<T>(object: CFTypeRef, contents: T) {
++    let body = object as *mut Body<T>;
++    if !(*body).contents.is_null() {
++        // SAFETY: a box this module's allocator made, per the caller; a second
++        // `-init` replaces the first's state, which is what Apple's does too.
++        drop(Box::from_raw((*body).contents));
++    }
++    // SAFETY: a fresh box, kept for the object's lifetime by `-dealloc`.
++    (*body).contents = Box::into_raw(Box::new(contents));
++}
++
+ /// The contents of `object`, if it is an instance of `class`.
+ ///
+ /// # Safety
 diff --git a/crates/corefoundation/src/lib.rs b/crates/corefoundation/src/lib.rs
 index 613445a..90337e2 100644
 --- a/crates/corefoundation/src/lib.rs
@@ -652,6 +748,185 @@ index 4e6220e..59e05ea 100644
  
      /// The number a program gets back is `kCurrentProcess`, and it compares
      /// equal to itself - which is the whole of what a caller does with it.
+diff --git a/crates/coreservices/src/systemconfig.rs b/crates/coreservices/src/systemconfig.rs
+new file mode 100644
+index 0000000..fda9012
+--- /dev/null
++++ b/crates/coreservices/src/systemconfig.rs
+@@ -0,0 +1,173 @@
++//! SystemConfiguration's dynamic store.
++//!
++//! Software that watches the host's network state opens a store and asks for
++//! keys in it. This runtime has no dynamic store server, so a store is a
++//! handle that answers "nothing" for every key: no notifications, no values,
++//! and no faults.
++
++#![allow(non_snake_case)]
++
++use std::ffi::c_void;
++
++type OSStatus = i32;
++const OK: OSStatus = 0;
++const ERR: OSStatus = -1;
++
++/// `SCDynamicStoreRef SCDynamicStoreCreateWithOptions(CFAllocatorRef,
++/// CFStringRef, CFDictionaryRef, SCDynamicStoreCallBack, SCDynamicStoreContext *)`.
++///
++/// # Safety
++///
++/// `store` is null or writable.
++pub unsafe extern "C" fn SCDynamicStoreCreateWithOptions(
++    _allocator: *mut c_void,
++    _name: *mut c_void,
++    _options: *mut c_void,
++    _callback: *mut c_void,
++    _context: *mut c_void,
++) -> *mut c_void {
++    // A one-word handle is enough: nothing dereferences it.
++    Box::into_raw(Box::new(0u64)).cast()
++}
++
++/// `CFPropertyListRef SCDynamicStoreCopyValue(SCDynamicStoreRef, CFStringRef)`.
++///
++/// # Safety
++///
++/// None beyond being called as the C function it is.
++pub unsafe extern "C" fn SCDynamicStoreCopyValue(
++    _store: *mut c_void,
++    _key: *mut c_void,
++) -> *mut c_void {
++    std::ptr::null_mut()
++}
++
++/// `CFDictionaryRef SCDynamicStoreCopyMultiple(SCDynamicStoreRef, CFArrayRef,
++/// CFArrayRef)`.
++///
++/// # Safety
++///
++/// None beyond being called as the C function it is.
++pub unsafe extern "C" fn SCDynamicStoreCopyMultiple(
++    _store: *mut c_void,
++    _keys: *mut c_void,
++    _patterns: *mut c_void,
++) -> *mut c_void {
++    corefoundation::collections::new_dictionary(
++        &[],
++        corefoundation::callbacks::Policy::from_key_callbacks(),
++        corefoundation::callbacks::Policy::from_type_callbacks(),
++        false,
++    ) as *mut c_void
++}
++
++/// `CFArrayRef SCDynamicStoreCopyKeyList(SCDynamicStoreRef, CFStringRef)`.
++///
++/// # Safety
++///
++/// None beyond being called as the C function it is.
++pub unsafe extern "C" fn SCDynamicStoreCopyKeyList(
++    _store: *mut c_void,
++    _pattern: *mut c_void,
++) -> *mut c_void {
++    corefoundation::collections::new_array(
++        &[],
++        corefoundation::callbacks::Policy::from_type_callbacks(),
++        false,
++    ) as *mut c_void
++}
++
++/// `Boolean SCDynamicStoreSetNotificationKeys(SCDynamicStoreRef, CFArrayRef,
++/// CFArrayRef)`.
++///
++/// # Safety
++///
++/// None beyond being called as the C function it is.
++pub unsafe extern "C" fn SCDynamicStoreSetNotificationKeys(
++    _store: *mut c_void,
++    _keys: *mut c_void,
++    _patterns: *mut c_void,
++) -> u8 {
++    1
++}
++
++/// `CFRunLoopSourceRef SCDynamicStoreCreateRunLoopSource(CFAllocatorRef,
++/// SCDynamicStoreRef, CFIndex)`: no source, because no key ever changes.
++///
++/// # Safety
++///
++/// None beyond being called as the C function it is.
++pub unsafe extern "C" fn SCDynamicStoreCreateRunLoopSource(
++    _allocator: *mut c_void,
++    _store: *mut c_void,
++    _order: isize,
++) -> *mut c_void {
++    std::ptr::null_mut()
++}
++
++/// `void CFRelease(CFTypeRef)`-style disposal for a store handle.
++///
++/// # Safety
++///
++/// `store` is null or a handle this module made.
++pub unsafe extern "C" fn SCDynamicStoreRelease(store: *mut c_void) {
++    if store.is_null() {
++        return;
++    }
++    // SAFETY: the handle `SCDynamicStoreCreateWithOptions` boxed.
++    drop(unsafe { Box::from_raw(store as *mut u64) });
++}
++
++/// `OSStatus SCDynamicStoreSetValue(SCDynamicStoreRef, CFStringRef,
++/// CFPropertyListRef)`: nothing is stored.
++///
++/// # Safety
++///
++/// None beyond being called as the C function it is.
++pub unsafe extern "C" fn SCDynamicStoreSetValue(
++    _store: *mut c_void,
++    _key: *mut c_void,
++    _value: *mut c_void,
++) -> OSStatus {
++    ERR
++}
++
++/// `void SCDynamicStoreSetDispatchQueue(SCDynamicStoreRef, dispatch_queue_t)`.
++///
++/// # Safety
++///
++/// None beyond being called as the C function it is.
++pub unsafe extern "C" fn SCDynamicStoreSetDispatchQueue(
++    _store: *mut c_void,
++    _queue: *mut c_void,
++) -> u8 {
++    1
++}
++
++#[allow(dead_code)]
++const _: OSStatus = OK;
++
++exports::exports! {
++    functions {
++        "SCDynamicStoreCreateWithOptions" => SCDynamicStoreCreateWithOptions,
++        "SCDynamicStoreCopyValue" => SCDynamicStoreCopyValue,
++        "SCDynamicStoreCopyMultiple" => SCDynamicStoreCopyMultiple,
++        "SCDynamicStoreCopyKeyList" => SCDynamicStoreCopyKeyList,
++        "SCDynamicStoreSetNotificationKeys" => SCDynamicStoreSetNotificationKeys,
++        "SCDynamicStoreCreateRunLoopSource" => SCDynamicStoreCreateRunLoopSource,
++        "SCDynamicStoreRelease" => SCDynamicStoreRelease,
++        "SCDynamicStoreSetValue" => SCDynamicStoreSetValue,
++        "SCDynamicStoreSetDispatchQueue" => SCDynamicStoreSetDispatchQueue,
++    }
++    data {
++        "_kSCDynamicStoreUseSessionKeys" => dynamic_store_keys(),
++    }
++}
++
++/// `CFStringRef kSCDynamicStoreUseSessionKeys`, as a run-time key.
++fn dynamic_store_keys() -> u64 {
++    corefoundation::base::global_cell(
++        "_kSCDynamicStoreUseSessionKeys",
++        corefoundation::base::interned_name("kSCDynamicStoreUseSessionKeys"),
++    )
++}
 diff --git a/crates/corevideo/src/lib.rs b/crates/corevideo/src/lib.rs
 index fc4d638..853377a 100644
 --- a/crates/corevideo/src/lib.rs
@@ -911,6 +1186,24 @@ index 8c93a0c..d857f79 100644
          "mkstemp" => mkstemp,
          "mkdtemp" => mkdtemp,
          "mkdtempat_np" => mkdtempat_np,
+diff --git a/crates/foundation/src/collections.rs b/crates/foundation/src/collections.rs
+index b95cba0..f72c528 100644
+--- a/crates/foundation/src/collections.rs
++++ b/crates/foundation/src/collections.rs
+@@ -1122,6 +1122,13 @@ unsafe extern "C" fn dictionary_enumerate(
+     // SAFETY: the guest's own state structure.
+     let state = unsafe { &mut *state };
+     let from = state.state;
++    // The mutation guard is handed out on *every* call, empty or exhausted
++    // included: a guest enumerator reads `state.mutations` after the refill
++    // unconditionally (cocoa_foundation's `NSFastIterator::next` does), so a
++    // zero-item answer must still point it somewhere valid. The items pointer
++    // is the caller's own buffer, which is what a count of zero never reads.
++    state.items = buffer;
++    state.mutations = &NEVER_MUTATED as *const usize as *mut usize;
+     let batch = dictionary.entries.len().saturating_sub(from).min(len);
+     if batch == 0 {
+         return 0;
 diff --git a/crates/foundation/src/lib.rs b/crates/foundation/src/lib.rs
 index f98f9db..4661b77 100644
 --- a/crates/foundation/src/lib.rs
@@ -985,7 +1278,7 @@ index f98f9db..4661b77 100644
      ] {
          out.extend(corefoundation::base::string_globals(table));
 diff --git a/crates/foundation/src/urlsession.rs b/crates/foundation/src/urlsession.rs
-index 566e43c..d8ad913 100644
+index 566e43c..842fdf6 100644
 --- a/crates/foundation/src/urlsession.rs
 +++ b/crates/foundation/src/urlsession.rs
 @@ -264,6 +264,11 @@ unsafe extern "C" fn set_http_body(receiver: Id, _sel: Sel, data: Id) {
@@ -1000,7 +1293,81 @@ index 566e43c..d8ad913 100644
  unsafe extern "C" fn http_body(receiver: Id, _sel: Sel) -> Id {
      // SAFETY: the receiver is a request this module made.
      let Some(request) = (unsafe { request_of(receiver) }) else {
-@@ -995,6 +1000,9 @@ pub(crate) fn install() {
+@@ -355,6 +360,73 @@ unsafe extern "C" fn all_header_fields(receiver: Id, _sel: Sel) -> Id {
+     headers_dictionary(&response.headers)
+ }
+ 
++/// `-[NSHTTPURLResponse initWithURL:statusCode:HTTPVersion:headerFields:]`.
++///
++/// wry builds the response a custom-protocol task is answered with this way:
++/// the URL, the status code and the header dictionary a handler supplied. The
++/// HTTP version is accepted and dropped - this runtime's responses are all
++/// HTTP/1.1, which is all WebKitGTK serves under the scenes.
++///
++/// # Safety
++///
++/// `receiver` is a freshly allocated `NSHTTPURLResponse`; `url` is null or an
++/// `NSURL`; `http_version` is null or a string; `header_fields` is null or a
++/// dictionary of string pairs.
++unsafe extern "C" fn init_with_url_status_code_http_version_header_fields(
++    receiver: Id,
++    _sel: Sel,
++    url: Id,
++    status: i64,
++    _http_version: Id,
++    header_fields: Id,
++) -> Id {
++    let Some(url) = (unsafe { crate::url::text_of(url) }) else {
++        return std::ptr::null_mut();
++    };
++    let headers = unsafe { string_dictionary_headers(header_fields) };
++    // SAFETY: the receiver is a live `Body<Response>` of the class this module
++    // registered. `class_createInstance` zeroes the contents word, so this
++    // initializer is the one that fills it.
++    unsafe {
++        corefoundation::boxed::place_contents::<Response>(
++            receiver as CFTypeRef,
++            Response {
++                url,
++                status: status.clamp(0, u16::MAX as i64) as u16,
++                headers,
++            },
++        )
++    };
++    receiver
++}
++
++/// The string pairs of a dictionary, as the caller's strings.
++///
++/// # Safety
++///
++/// `dictionary` is null or a dictionary whose keys and values are strings.
++unsafe fn string_dictionary_headers(dictionary: Id) -> Vec<(String, String)> {
++    if dictionary.is_null() {
++        return Vec::new();
++    }
++    // SAFETY: null checked, and the call guarantees a dictionary.
++    let Some(dictionary) =
++        (unsafe { corefoundation::collections::dictionary(dictionary as CFTypeRef) })
++    else {
++        return Vec::new();
++    };
++    dictionary
++        .entries
++        .iter()
++        .map(|(key, value)| unsafe {
++            (
++                String::from_utf8_lossy(&crate::string::bytes(*key as Id)).into_owned(),
++                String::from_utf8_lossy(&crate::string::bytes(*value as Id)).into_owned(),
++            )
++        })
++        .collect()
++}
++
+ fn headers_dictionary(headers: &[(String, String)]) -> Id {
+     let pairs: Vec<(CFTypeRef, CFTypeRef)> = headers
+         .iter()
+@@ -995,6 +1067,9 @@ pub(crate) fn install() {
          "URL" => request_url, c"@16@0:8";
          "HTTPMethod" => http_method, c"@16@0:8";
          "HTTPBody" => http_body, c"@16@0:8";
@@ -1010,6 +1377,15 @@ index 566e43c..d8ad913 100644
          "valueForHTTPHeaderField:" => value_for_header, c"@24@0:8@16";
          "allHTTPHeaderFields" => request_headers, c"@16@0:8";
          "timeoutInterval" => timeout_interval, c"d16@0:8";
+@@ -1021,6 +1096,8 @@ pub(crate) fn install() {
+     methods!(response, {
+         "statusCode" => status_code, c"q16@0:8";
+         "allHeaderFields" => all_header_fields, c"@16@0:8";
++        "initWithURL:statusCode:HTTPVersion:headerFields:"
++            => init_with_url_status_code_http_version_header_fields, c"@48@0:8@16q24@32@40";
+     });
+ 
+     let task = task_class();
 diff --git a/crates/rosemary/src/abi/table.rs b/crates/rosemary/src/abi/table.rs
 index 9b6be3d..0b18d0a 100644
 --- a/crates/rosemary/src/abi/table.rs
@@ -1173,10 +1549,10 @@ index 4c5ccc7..39358a9 100644
      //
      // A `@synthesize`d property does not compile to a load and a store. For
 diff --git a/crates/rosemary/src/objcexc.rs b/crates/rosemary/src/objcexc.rs
-index f2dfcd5..64eeffe 100644
+index f2dfcd5..956021c 100644
 --- a/crates/rosemary/src/objcexc.rs
 +++ b/crates/rosemary/src/objcexc.rs
-@@ -36,6 +36,130 @@ static RECORDS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+@@ -36,6 +36,158 @@ static RECORDS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
  static NO_BASES: AtomicU64 = AtomicU64::new(0);
  static ONE_BASE: AtomicU64 = AtomicU64::new(0);
  
@@ -1199,10 +1575,12 @@ index f2dfcd5..64eeffe 100644
 +
 +/// Settle the personality routine for a guest that links no C++ runtime.
 +///
-+/// Nothing is bound here: the address is read out of the vendored `libc++abi`
-+/// and recorded, and the caller's report gains a *data* symbol so an image that
-+/// imports `___objc_personality_v0` binds it rather than calling through a slot
-+/// left zero. Returns whether a routine was found.
++/// The address is read out of the vendored `libc++abi`, recorded, and written
++/// into every `___objc_personality_v0` slot the report left zero - which is
++/// what a libobjc import is: data the unwinder reads, never a call target. An
++/// image's LSDA names the routine by that slot, so a slot left zero is a crash
++/// the moment an exception is raised, and an exceptions table whose personality
++/// is zero can never reach a `@catch`. Returns the number of slots written.
 +pub fn publish_personality<M: machish::memory::Regions>(
 +    report: &mut machish::report::LinkReport,
 +    memory: &mut M,
@@ -1214,9 +1592,35 @@ index f2dfcd5..64eeffe 100644
 +    let Some(addr) = personality_from_runtime(flavor) else {
 +        return 0;
 +    };
-+    let _ = (report, memory);
 +    PERSONALITY.store(addr, Ordering::Release);
-+    1
++    let mut bound = 0;
++    for image in &mut report.images {
++        let mut satisfied = Vec::new();
++        for (i, missing) in image.missing.iter().enumerate() {
++            if missing.symbol != "___objc_personality_v0" {
++                continue;
++            }
++            if memory.write(missing.slot_va, &addr.to_le_bytes()).is_err() {
++                continue;
++            }
++            satisfied.push(i);
++        }
++        for i in satisfied.into_iter().rev() {
++            let was = image.missing.remove(i);
++            image.bindings.push(machish::report::BindingRecord {
++                slot_va: was.slot_va,
++                stub_va: was.stub_va,
++                library: was.library,
++                symbol: was.symbol,
++                resolved: addr,
++                kind: machish::fixups::BindKind::NonLazy,
++                weak_import: was.weak_import,
++                tag: 0,
++            });
++            bound += 1;
++        }
++    }
++    bound
 +}
 +
 +/// The address of `___gxx_personality_v0` inside the vendored `libc++abi`, if
@@ -1307,7 +1711,7 @@ index f2dfcd5..64eeffe 100644
  /// The record `@catch (id)` names, `_OBJC_EHTYPE_id`.
  const ID_NAME: &str = "id";
  
-@@ -212,6 +336,7 @@ pub fn bind<M: machish::memory::Regions>(
+@@ -212,6 +364,7 @@ pub fn bind<M: machish::memory::Regions>(
      ) else {
          return Ok(0);
      };
@@ -1344,6 +1748,828 @@ index f85da7f..b2c5766 100644
      trust,
  }
  
+diff --git a/crates/security/src/securetransport.rs b/crates/security/src/securetransport.rs
+new file mode 100644
+index 0000000..5084ebe
+--- /dev/null
++++ b/crates/security/src/securetransport.rs
+@@ -0,0 +1,816 @@
++//! SecureTransport: the `SSL*` TLS client API, over Rustls.
++//!
++//! A guest that carries its own network stack (the Roblox executor does) opens a
++//! context, installs `SSLSetIOFuncs` callbacks, sets the peer's name, and drives
++//! a handshake with `SSLHandshake`. Rustls does the TLS work; guest callbacks
++//! move the bytes so a non-blocking caller sees `errSSLWouldBlock`.
++//!
++//! The server is always verified: against the host's roots, and against the
++//! name given to `SSLSetPeerDomainName`. There is no "skip verification" path.
++
++#![allow(non_snake_case)]
++
++use std::ffi::c_void;
++use std::io::{Read, Write};
++
++use corefoundation::base::CFTypeRef;
++use rustls_pki_types::{CertificateDer, ServerName};
++
++type OSStatus = i32;
++/// `errSSLParam`.
++const PARAM: OSStatus = -50;
++/// `noErr`.
++const OK: OSStatus = 0;
++/// `errSSLCrypto`.
++const CRYPTO: OSStatus = -9802;
++/// `errSSLWouldBlock`.
++const WOULD_BLOCK: OSStatus = -9803;
++/// `errSSLProtocol`.
++const PROTOCOL: OSStatus = -9807;
++/// `errSSLPeerHandshakeFail`.
++const PEER_HANDSHAKE_FAIL: OSStatus = -9812;
++/// `errSSLPeerCertUnknown`.
++const PEER_CERT_UNKNOWN: OSStatus = -9814;
++/// `errSSLInternal`.
++const INTERNAL: OSStatus = -9817;
++
++/// `kSSLConnected`.
++const STATE_CONNECTED: i32 = 2;
++/// `kSSLHandshake`.
++const STATE_HANDSHAKE: i32 = 1;
++/// `kSSLIdle`.
++const STATE_IDLE: i32 = 0;
++
++/// `OSStatus (*SSLReadFunc)(SSLConnectionRef, void *, size_t *)`.
++type ReadFunc = Option<unsafe extern "C" fn(*const c_void, *mut c_void, *mut usize) -> OSStatus>;
++/// `OSStatus (*SSLWriteFunc)(SSLConnectionRef, const void *, size_t *)`.
++type WriteFunc = Option<unsafe extern "C" fn(*const c_void, *const c_void, *mut usize) -> OSStatus>;
++
++/// Handshake steps tried per call before yielding `errSSLWouldBlock`.
++const HANDSHAKE_STEPS: usize = 8;
++/// Bytes read from the guest per step.
++const IO_BUFFER: usize = 64 * 1024;
++
++struct Connection {
++    server_name: String,
++    read: ReadFunc,
++    write: WriteFunc,
++    io: *mut c_void,
++    /// TLS output not yet accepted by the guest.
++    outbound: Vec<u8>,
++    /// Suites the caller asked for; Rustls chooses from its own set.
++    ciphers: Vec<u16>,
++    tls: Option<rustls::ClientConnection>,
++}
++
++impl Connection {
++    /// One guest read. `Err` carries the callback's refusal.
++    fn io_read(&mut self, buffer: &mut [u8]) -> Result<usize, OSStatus> {
++        let Some(read) = self.read else {
++            return Ok(0);
++        };
++        let mut count = buffer.len();
++        // SAFETY: the guest's callback, given its own connection reference and a
++        // writable buffer of the stated length.
++        let status = unsafe { read(self.io, buffer.as_mut_ptr() as *mut c_void, &mut count) };
++        match status {
++            OK | WOULD_BLOCK => Ok(count.min(buffer.len())),
++            other => Err(other),
++        }
++    }
++
++    /// Hand `data` to the guest; whatever it does not take stays queued.
++    fn io_write(&mut self, data: &[u8]) -> OSStatus {
++        let Some(write) = self.write else {
++            self.outbound.extend_from_slice(data);
++            return OK;
++        };
++        let mut left = data;
++        while !left.is_empty() {
++            let mut count = left.len();
++            // SAFETY: the guest's callback, its own connection reference, and a
++            // readable buffer of the stated length.
++            let status = unsafe { write(self.io, left.as_ptr() as *const c_void, &mut count) };
++            if status != OK && status != WOULD_BLOCK {
++                self.outbound.extend_from_slice(left);
++                return status;
++            }
++            if count == 0 {
++                break;
++            }
++            left = &left[count.min(left.len())..];
++        }
++        if !left.is_empty() {
++            self.outbound.extend_from_slice(left);
++        }
++        OK
++    }
++
++    /// Send queued TLS output to the guest.
++    fn flush(&mut self) -> OSStatus {
++        let queued = std::mem::take(&mut self.outbound);
++        self.io_write(&queued)
++    }
++
++    /// Move whatever the current handshake state wants written into `outbound`.
++    fn drain_tls(&mut self) {
++        let Some(tls) = self.tls.as_mut() else {
++            return;
++        };
++        let mut chunk = [0u8; IO_BUFFER];
++        loop {
++            match tls.write_tls(&mut &mut chunk[..]) {
++                Ok(0) | Err(_) => break,
++                Ok(n) => self.outbound.extend_from_slice(&chunk[..n]),
++            }
++        }
++    }
++
++    /// Give guest bytes to Rustls and process whatever became complete.
++    fn feed(&mut self, data: &[u8]) -> Result<(), OSStatus> {
++        let Some(tls) = self.tls.as_mut() else {
++            return Err(INTERNAL);
++        };
++        let mut cursor = data;
++        while !cursor.is_empty() {
++            match tls.read_tls(&mut cursor) {
++                Ok(0) => break,
++                Ok(_) => {
++                    tls.process_new_packets().map_err(|_| PEER_CERT_UNKNOWN)?;
++                }
++                Err(_) => return Err(PROTOCOL),
++            }
++        }
++        Ok(())
++    }
++
++    fn established(&self) -> bool {
++        self.tls.as_ref().is_some_and(|tls| !tls.is_handshaking())
++    }
++
++    /// Plaintext Rustls already holds for the caller. A settled connection
++    /// reports one byte so a caller polling the size keeps reading; what is
++    /// actually there is only known by reading, and `SSLRead` spends it.
++    fn buffered_plaintext(&self) -> usize {
++        if self.established() { 1 } else { 0 }
++    }
++}
++
++// A context is created, used and dropped by one guest thread at a time; the
++// handle is opaque and never shared inside the runtime.
++unsafe impl Send for Connection {}
++
++fn roots() -> &'static std::sync::Arc<rustls::RootCertStore> {
++    static ROOTS: std::sync::OnceLock<std::sync::Arc<rustls::RootCertStore>> =
++        std::sync::OnceLock::new();
++    ROOTS.get_or_init(|| {
++        use rustls_pki_types::pem::PemObject;
++        const BUNDLES: &[&str] = &[
++            "/etc/ssl/certs/ca-certificates.crt",
++            "/etc/pki/tls/certs/ca-bundle.crt",
++            "/etc/ssl/ca-bundle.pem",
++            "/etc/ssl/cert.pem",
++            "/usr/local/share/certs/ca-root-nss.crt",
++        ];
++        let named = std::env::var_os("SSL_CERT_FILE").map(std::path::PathBuf::from);
++        let pem = named
++            .into_iter()
++            .chain(BUNDLES.iter().map(std::path::PathBuf::from))
++            .find_map(|path| std::fs::read(path).ok())
++            .unwrap_or_default();
++        let mut store = rustls::RootCertStore::empty();
++        for der in CertificateDer::pem_slice_iter(&pem).filter_map(Result::ok) {
++            let _ = store.add(der);
++        }
++        std::sync::Arc::new(store)
++    })
++}
++
++fn config() -> &'static std::sync::Arc<rustls::ClientConfig> {
++    static CONFIG: std::sync::OnceLock<std::sync::Arc<rustls::ClientConfig>> =
++        std::sync::OnceLock::new();
++    CONFIG.get_or_init(|| {
++        let provider = rustls::crypto::ring::default_provider();
++        let config = rustls::ClientConfig::builder_with_provider(provider.into())
++            .with_safe_default_protocol_versions()
++            .expect("the ring provider supports the default TLS versions")
++            .with_root_certificates(roots().clone())
++            .with_no_client_auth();
++        std::sync::Arc::new(config)
++    })
++}
++
++#[repr(C)]
++struct Body {
++    isa: *const objc::class::Class,
++    connection: *mut Connection,
++}
++
++fn class() -> &'static objc::class::Class {
++    static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
++    let pointer = *CLASS.get_or_init(|| {
++        let class = corefoundation::base::register(c"__R3SSLContext", None, size_of::<Body>(), true);
++        class.replace_method(
++            objc::sel::get("dealloc"),
++            dealloc as *const c_void,
++            c"v16@0:8",
++        );
++        objc::class::ptr(class) as usize
++    });
++    // SAFETY: a class registered above and kept for the process.
++    unsafe {
++        objc::class::from_ptr(pointer as *const objc::class::Class).expect("an SSL context class")
++    }
++}
++
++unsafe extern "C" fn dealloc(receiver: objc::object::Id, _sel: objc::sel::Sel) {
++    // SAFETY: this class's layout, and the connection `SSLCreateContext` boxed.
++    unsafe {
++        let body = receiver as *mut Body;
++        if !(*body).connection.is_null() {
++            drop(Box::from_raw((*body).connection));
++        }
++        objc::arc::finalize(receiver);
++    }
++}
++
++fn new_handle(connection: Connection) -> CFTypeRef {
++    // SAFETY: `Body` is the registered layout.
++    let body = unsafe { corefoundation::base::allocate::<Body>(class()) };
++    if body.is_null() {
++        return std::ptr::null();
++    }
++    // SAFETY: a freshly allocated body, written once before publication.
++    unsafe { (*body).connection = Box::into_raw(Box::new(connection)) };
++    body as CFTypeRef
++}
++
++/// # Safety
++///
++/// `ctx` is null or a live context from [`SSLCreateContext`].
++unsafe fn connection<'a>(ctx: CFTypeRef) -> Option<&'a mut Connection> {
++    if ctx.is_null() || !unsafe { corefoundation::base::is_kind_of(ctx, class()) } {
++        return None;
++    }
++    let body = ctx as *mut Body;
++    if unsafe { (*body).connection.is_null() } {
++        return None;
++    }
++    // SAFETY: a body of this class, live for `'a`.
++    Some(unsafe { &mut *(*body).connection })
++}
++
++/// `SSLContextRef SSLCreateContext(CFAllocatorRef, SSLProtocolSide,
++/// SSLConnectionType)`.
++///
++/// # Safety
++///
++/// None beyond being called as the C function it is.
++pub unsafe extern "C" fn SSLCreateContext(
++    _allocator: CFTypeRef,
++    _side: i32,
++    _kind: i32,
++) -> CFTypeRef {
++    new_handle(Connection {
++        server_name: String::new(),
++        read: None,
++        write: None,
++        io: std::ptr::null_mut(),
++        outbound: Vec::new(),
++        ciphers: Vec::new(),
++        tls: None,
++    })
++}
++
++/// `OSStatus SSLSetIOFuncs(SSLContextRef, SSLReadFunc, SSLWriteFunc)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; the callbacks stay valid while it is used.
++pub unsafe extern "C" fn SSLSetIOFuncs(
++    ctx: CFTypeRef,
++    read: ReadFunc,
++    write: WriteFunc,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    connection.read = read;
++    connection.write = write;
++    OK
++}
++
++/// `OSStatus SSLSetConnection(SSLContextRef, SSLConnectionRef)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `io` is the value the callbacks expect.
++pub unsafe extern "C" fn SSLSetConnection(ctx: CFTypeRef, io: *mut c_void) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    connection.io = io;
++    OK
++}
++
++/// `OSStatus SSLSetPeerDomainName(SSLContextRef, const char *, size_t)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `name` is readable for `length` bytes.
++pub unsafe extern "C" fn SSLSetPeerDomainName(
++    ctx: CFTypeRef,
++    name: *const u8,
++    length: usize,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if name.is_null() || length == 0 {
++        return PARAM;
++    }
++    // SAFETY: readable for `length`, per the caller.
++    let bytes = unsafe { std::slice::from_raw_parts(name, length) };
++    let text = String::from_utf8_lossy(bytes);
++    connection.server_name = text.trim_end_matches('\0').to_string();
++    OK
++}
++
++/// `OSStatus SSLSetProtocolVersionMin(SSLContextRef, SSLProtocol)`.
++///
++/// Rustls always negotiates TLS 1.2 or newer, so every minimum a caller can ask
++/// for that this runtime supports is already met.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context.
++pub unsafe extern "C" fn SSLSetProtocolVersionMin(ctx: CFTypeRef, _version: i32) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    if unsafe { connection(ctx) }.is_some() {
++        OK
++    } else {
++        PARAM
++    }
++}
++
++/// `OSStatus SSLSetSessionOption(SSLContextRef, SSLSessionOption, Boolean)`.
++///
++/// The breakout and ticket options are accepted; verification is always on, so
++/// `kSSLSessionOptionBreakOnServerAuth` cannot turn it off.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context.
++pub unsafe extern "C" fn SSLSetSessionOption(
++    ctx: CFTypeRef,
++    _option: i32,
++    _value: u8,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    if unsafe { connection(ctx) }.is_some() {
++        OK
++    } else {
++        PARAM
++    }
++}
++
++/// `OSStatus SSLHandshake(SSLContextRef)`.
++///
++/// Creates the connection on the first call, then pumps it. Returns
++/// `errSSLWouldBlock` while the transport has nothing new, which is what a
++/// caller loops on.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context.
++pub unsafe extern "C" fn SSLHandshake(ctx: CFTypeRef) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++
++    if connection.tls.is_none() {
++        let Ok(name) = ServerName::try_from(connection.server_name.clone()) else {
++            return PEER_HANDSHAKE_FAIL;
++        };
++        match rustls::ClientConnection::new(config().clone(), name) {
++            Ok(tls) => connection.tls = Some(tls),
++            Err(_) => return INTERNAL,
++        }
++    }
++
++    connection.drain_tls();
++    let mut status = connection.flush();
++    if status != OK {
++        return status;
++    }
++
++    for _ in 0..HANDSHAKE_STEPS {
++        if connection.established() {
++            return OK;
++        }
++        let mut buffer = [0u8; IO_BUFFER];
++        let read = match connection.io_read(&mut buffer) {
++            Ok(read) => read,
++            Err(code) => return code,
++        };
++        if read == 0 {
++            return WOULD_BLOCK;
++        }
++        if let Err(code) = connection.feed(&buffer[..read]) {
++            return code;
++        }
++        connection.drain_tls();
++        status = connection.flush();
++        if status != OK {
++            return status;
++        }
++    }
++
++    if connection.established() {
++        OK
++    } else {
++        WOULD_BLOCK
++    }
++}
++
++/// Read plaintext Rustls already produced, returning how much.
++fn read_plaintext(connection: &mut Connection, buffer: &mut [u8]) -> usize {
++    let Some(tls) = connection.tls.as_mut() else {
++        return 0;
++    };
++    let mut written = 0;
++    while written < buffer.len() {
++        match tls.reader().read(&mut buffer[written..]) {
++            Ok(0) => break,
++            Ok(n) => written += n,
++            Err(_) => break,
++        }
++    }
++    written
++}
++
++/// `OSStatus SSLRead(SSLContextRef, void *, size_t, size_t *)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `data` is writable for `length` bytes;
++/// `processed` is null or writable.
++pub unsafe extern "C" fn SSLRead(
++    ctx: CFTypeRef,
++    data: *mut c_void,
++    length: usize,
++    processed: *mut usize,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if !processed.is_null() {
++        // SAFETY: writable, per the caller.
++        unsafe { processed.write(0) };
++    }
++    if data.is_null() || length == 0 {
++        return PARAM;
++    }
++    // SAFETY: writable for `length`, per the caller.
++    let buffer = unsafe { std::slice::from_raw_parts_mut(data as *mut u8, length) };
++
++    let mut written = read_plaintext(connection, buffer);
++    if written == 0 {
++        let mut wire = [0u8; IO_BUFFER];
++        let read = match connection.io_read(&mut wire) {
++            Ok(read) => read,
++            Err(code) => return code,
++        };
++        if read == 0 {
++            return WOULD_BLOCK;
++        }
++        if let Err(code) = connection.feed(&wire[..read]) {
++            return code;
++        }
++        connection.drain_tls();
++        let status = connection.flush();
++        if status != OK {
++            return status;
++        }
++        written = read_plaintext(connection, buffer);
++    }
++
++    if !processed.is_null() {
++        // SAFETY: writable, per the caller.
++        unsafe { processed.write(written) };
++    }
++    if written == 0 {
++        WOULD_BLOCK
++    } else {
++        OK
++    }
++}
++
++/// `OSStatus SSLWrite(SSLContextRef, const void *, size_t, size_t *)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `data` is readable for `length` bytes;
++/// `processed` is null or writable.
++pub unsafe extern "C" fn SSLWrite(
++    ctx: CFTypeRef,
++    data: *const c_void,
++    length: usize,
++    processed: *mut usize,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if !processed.is_null() {
++        // SAFETY: writable, per the caller.
++        unsafe { processed.write(0) };
++    }
++    let Some(tls) = connection.tls.as_mut() else {
++        return PROTOCOL;
++    };
++    if data.is_null() || length == 0 {
++        return PARAM;
++    }
++    // SAFETY: readable for `length`, per the caller.
++    let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, length) };
++
++    let mut written = 0;
++    while written < bytes.len() {
++        match tls.writer().write(&bytes[written..]) {
++            Ok(0) => break,
++            Ok(n) => written += n,
++            Err(_) => return CRYPTO,
++        }
++    }
++    connection.drain_tls();
++    let status = connection.flush();
++    if status != OK {
++        return status;
++    }
++
++    if !processed.is_null() {
++        // SAFETY: writable, per the caller.
++        unsafe { processed.write(written) };
++    }
++    if written == bytes.len() {
++        OK
++    } else {
++        WOULD_BLOCK
++    }
++}
++
++/// `OSStatus SSLClose(SSLContextRef)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context.
++pub unsafe extern "C" fn SSLClose(ctx: CFTypeRef) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if let Some(tls) = connection.tls.as_mut() {
++        tls.send_close_notify();
++    }
++    connection.drain_tls();
++    let _ = connection.flush();
++    OK
++}
++
++/// `OSStatus SSLGetConnection(SSLContextRef, SSLConnectionRef *)`: the value
++/// given to `SSLSetConnection`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `io` is null or writable.
++pub unsafe extern "C" fn SSLGetConnection(
++    ctx: CFTypeRef,
++    io: *mut *mut c_void,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if io.is_null() {
++        return PARAM;
++    }
++    // SAFETY: writable, per the caller.
++    unsafe { io.write(connection.io) };
++    OK
++}
++
++/// `OSStatus SSLSetProtocolVersionMax(SSLContextRef, SSLProtocol)`.
++///
++/// Rustls negotiates the newest version both ends share; the ceiling a caller
++/// names is accepted as a request it already honours.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context.
++pub unsafe extern "C" fn SSLSetProtocolVersionMax(ctx: CFTypeRef, _version: i32) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    if unsafe { connection(ctx) }.is_some() {
++        OK
++    } else {
++        PARAM
++    }
++}
++
++/// `OSStatus SSLSetEnabledCiphers(SSLContextRef, const SSLCipherSuite *,
++/// size_t)`.
++///
++/// Rustls chooses from its own suite set; a caller's list is noted and not
++/// enforced, because a suite it names may not exist in the Rustls backend.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `ciphers` is readable for `count` entries.
++pub unsafe extern "C" fn SSLSetEnabledCiphers(
++    ctx: CFTypeRef,
++    ciphers: *const u16,
++    count: usize,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if ciphers.is_null() && count > 0 {
++        return PARAM;
++    }
++    if !ciphers.is_null() {
++        // SAFETY: readable for `count`, per the caller.
++        let list = unsafe { std::slice::from_raw_parts(ciphers, count) };
++        connection.ciphers = list.to_vec();
++    }
++    OK
++}
++
++/// `OSStatus SSLGetEnabledCiphers(SSLContextRef, SSLCipherSuite *, size_t *)`.
++///
++/// Answers the list the caller set, or the one a fresh context reports.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `ciphers` is writable for `*count` entries
++/// and `count` is null or writable.
++pub unsafe extern "C" fn SSLGetEnabledCiphers(
++    ctx: CFTypeRef,
++    ciphers: *mut u16,
++    count: *mut usize,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if count.is_null() {
++        return PARAM;
++    }
++    let available = connection.ciphers.len();
++    // SAFETY: writable, per the caller.
++    let room = unsafe { count.read() };
++    if !ciphers.is_null() {
++        let write = room.min(available);
++        for (i, suite) in connection.ciphers.iter().take(write).enumerate() {
++            // SAFETY: writable for `room` entries, per the caller.
++            unsafe { ciphers.add(i).write(*suite) };
++        }
++    }
++    // SAFETY: writable, per the caller.
++    unsafe { count.write(available) };
++    OK
++}
++
++/// `OSStatus SSLGetNumberEnabledCiphers(SSLContextRef, size_t *)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `count` is null or writable.
++pub unsafe extern "C" fn SSLGetNumberEnabledCiphers(
++    ctx: CFTypeRef,
++    count: *mut usize,
++) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if count.is_null() {
++        return PARAM;
++    }
++    // SAFETY: writable, per the caller.
++    unsafe { count.write(connection.ciphers.len()) };
++    OK
++}
++
++/// `OSStatus SSLSetCertificate(SSLContextRef, CFArrayRef)`: a client identity.
++///
++/// No client certificate is used by this runtime; the call is accepted so a
++/// handshake setup that always makes it still proceeds.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context.
++pub unsafe extern "C" fn SSLSetCertificate(ctx: CFTypeRef, _identity: CFTypeRef) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    if unsafe { connection(ctx) }.is_some() {
++        OK
++    } else {
++        PARAM
++    }
++}
++
++/// `OSStatus SSLCopyPeerTrust(SSLContextRef, SecTrustRef *)`.
++///
++/// The peer's chain, as a trust object, which is what a caller inspects with
++/// the `SecTrust` API. Null until the handshake has produced a chain.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `trust` is null or writable.
++pub unsafe extern "C" fn SSLCopyPeerTrust(ctx: CFTypeRef, trust: *mut CFTypeRef) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if trust.is_null() {
++        return PARAM;
++    }
++    let chain: Vec<Vec<u8>> = connection
++        .tls
++        .as_ref()
++        .map(|tls| tls.peer_certificates().unwrap_or_default().iter().map(|c| c.as_ref().to_vec()).collect())
++        .unwrap_or_default();
++    // SAFETY: writable, per the caller.
++    unsafe { trust.write(super::trust::new_trust(chain, String::new())) };
++    OK
++}
++
++/// `OSStatus SSLGetBufferedReadSize(SSLContextRef, size_t *)`: bytes of
++/// plaintext Rustls already holds for the caller.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `size` is null or writable.
++pub unsafe extern "C" fn SSLGetBufferedReadSize(ctx: CFTypeRef, size: *mut usize) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if size.is_null() {
++        return PARAM;
++    }
++    // SAFETY: writable, per the caller.
++    unsafe { size.write(connection.buffered_plaintext()) };
++    OK
++}
++
++/// `OSStatus SSLGetSessionState(SSLContextRef, SSLSessionState *)`.
++///
++/// # Safety
++///
++/// `ctx` is null or a live context; `state` is null or writable.
++pub unsafe extern "C" fn SSLGetSessionState(ctx: CFTypeRef, state: *mut i32) -> OSStatus {
++    // SAFETY: the caller's guarantee.
++    let Some(connection) = (unsafe { connection(ctx) }) else {
++        return PARAM;
++    };
++    if !state.is_null() {
++        let value = match connection.tls.as_ref() {
++            None => STATE_IDLE,
++            Some(tls) if tls.is_handshaking() => STATE_HANDSHAKE,
++            Some(_) => STATE_CONNECTED,
++        };
++        // SAFETY: writable, per the caller.
++        unsafe { state.write(value) };
++    }
++    OK
++}
++
++exports::exports! {
++    functions {
++        "SSLCreateContext" => SSLCreateContext,
++        "SSLSetIOFuncs" => SSLSetIOFuncs,
++        "SSLSetConnection" => SSLSetConnection,
++        "SSLGetConnection" => SSLGetConnection,
++        "SSLSetPeerDomainName" => SSLSetPeerDomainName,
++        "SSLSetProtocolVersionMin" => SSLSetProtocolVersionMin,
++        "SSLSetProtocolVersionMax" => SSLSetProtocolVersionMax,
++        "SSLSetSessionOption" => SSLSetSessionOption,
++        "SSLSetEnabledCiphers" => SSLSetEnabledCiphers,
++        "SSLGetEnabledCiphers" => SSLGetEnabledCiphers,
++        "SSLGetNumberEnabledCiphers" => SSLGetNumberEnabledCiphers,
++        "SSLSetCertificate" => SSLSetCertificate,
++        "SSLCopyPeerTrust" => SSLCopyPeerTrust,
++        "SSLGetBufferedReadSize" => SSLGetBufferedReadSize,
++        "SSLHandshake" => SSLHandshake,
++        "SSLRead" => SSLRead,
++        "SSLWrite" => SSLWrite,
++        "SSLClose" => SSLClose,
++        "SSLGetSessionState" => SSLGetSessionState,
++    }
++}
 diff --git a/crates/security/src/trust.rs b/crates/security/src/trust.rs
 index fef537a..3d0e0ff 100644
 --- a/crates/security/src/trust.rs
@@ -2216,1054 +3442,3 @@ index f2d680e..dfc6404 100644
          "initWithFrame:configuration:" => init_with_frame_configuration, c"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
          "initWithFrame:" => init_with_frame, c"@48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
          "dealloc" => dealloc, c"v16@0:8";
-diff --git a/crates/appkit/src/protocols.rs b/crates/appkit/src/protocols.rs
-new file mode 100644
-index 0000000..73d0470
---- /dev/null
-+++ b/crates/appkit/src/protocols.rs
-@@ -0,0 +1,44 @@
-+//! The Objective-C protocols AppKit's classes declare they conform to.
-+//!
-+//! A guest that subclasses `NSView` asks for `NSTextInputClient` by name and
-+//! adopts it (`tao`, which Roblox's executor links, does exactly this). The
-+//! methods are this crate's; what this module adds is the protocol object that
-+//! names them, so a guest's lookup succeeds.
-+
-+use std::ffi::CStr;
-+
-+/// The instance methods an `NSTextInputClient` must answer, as
-+/// `(selector, type encoding)`.
-+const TEXT_INPUT_CLIENT: &[(&str, &CStr)] = &[
-+    ("insertText:replacementRange:", c"v40@0:8@16{_NSRange=QQ}24"),
-+    ("doCommandBySelector:", c"v24@0:8:16"),
-+    ("setMarkedText:selectedRange:replacementRange:", c"v56@0:8@16{_NSRange=QQ}24{_NSRange=QQ}40"),
-+    ("unmarkText", c"v16@0:8"),
-+    ("hasMarkedText", c"c16@0:8"),
-+    ("markedRange", c"{_NSRange=QQ}16@0:8"),
-+    ("selectedRange", c"{_NSRange=QQ}16@0:8"),
-+    ("validAttributesForMarkedText", c"@16@0:8"),
-+    ("attributedSubstringForProposedRange:actualRange:", c"@48@0:8{_NSRange=QQ}16^{_NSRange=QQ}32"),
-+    ("firstRectForCharacterRange:actualRange:", c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{_NSRange=QQ}16^{_NSRange=QQ}32"),
-+    ("characterIndexForPoint:", c"Q32@0:8{CGPoint=dd}16"),
-+];
-+
-+/// Declare and register the protocols a guest may look up.
-+pub fn install() {
-+    let Some(protocol) = objc::protocol::allocate(c"NSTextInputClient") else {
-+        return;
-+    };
-+    for (selector, types) in TEXT_INPUT_CLIENT {
-+        // Optional in the real protocol for the last three; a guest only looks
-+        // the method up when it means to call it.
-+        let required = !matches!(
-+            *selector,
-+            "validAttributesForMarkedText"
-+                | "attributedSubstringForProposedRange:actualRange:"
-+                | "firstRectForCharacterRange:actualRange:"
-+                | "characterIndexForPoint:"
-+        );
-+        protocol.add_method(objc::sel::get(selector), types, required, true);
-+    }
-+    objc::protocol::register(protocol);
-+}
-diff --git a/crates/coreservices/src/systemconfig.rs b/crates/coreservices/src/systemconfig.rs
-new file mode 100644
-index 0000000..fda9012
---- /dev/null
-+++ b/crates/coreservices/src/systemconfig.rs
-@@ -0,0 +1,173 @@
-+//! SystemConfiguration's dynamic store.
-+//!
-+//! Software that watches the host's network state opens a store and asks for
-+//! keys in it. This runtime has no dynamic store server, so a store is a
-+//! handle that answers "nothing" for every key: no notifications, no values,
-+//! and no faults.
-+
-+#![allow(non_snake_case)]
-+
-+use std::ffi::c_void;
-+
-+type OSStatus = i32;
-+const OK: OSStatus = 0;
-+const ERR: OSStatus = -1;
-+
-+/// `SCDynamicStoreRef SCDynamicStoreCreateWithOptions(CFAllocatorRef,
-+/// CFStringRef, CFDictionaryRef, SCDynamicStoreCallBack, SCDynamicStoreContext *)`.
-+///
-+/// # Safety
-+///
-+/// `store` is null or writable.
-+pub unsafe extern "C" fn SCDynamicStoreCreateWithOptions(
-+    _allocator: *mut c_void,
-+    _name: *mut c_void,
-+    _options: *mut c_void,
-+    _callback: *mut c_void,
-+    _context: *mut c_void,
-+) -> *mut c_void {
-+    // A one-word handle is enough: nothing dereferences it.
-+    Box::into_raw(Box::new(0u64)).cast()
-+}
-+
-+/// `CFPropertyListRef SCDynamicStoreCopyValue(SCDynamicStoreRef, CFStringRef)`.
-+///
-+/// # Safety
-+///
-+/// None beyond being called as the C function it is.
-+pub unsafe extern "C" fn SCDynamicStoreCopyValue(
-+    _store: *mut c_void,
-+    _key: *mut c_void,
-+) -> *mut c_void {
-+    std::ptr::null_mut()
-+}
-+
-+/// `CFDictionaryRef SCDynamicStoreCopyMultiple(SCDynamicStoreRef, CFArrayRef,
-+/// CFArrayRef)`.
-+///
-+/// # Safety
-+///
-+/// None beyond being called as the C function it is.
-+pub unsafe extern "C" fn SCDynamicStoreCopyMultiple(
-+    _store: *mut c_void,
-+    _keys: *mut c_void,
-+    _patterns: *mut c_void,
-+) -> *mut c_void {
-+    corefoundation::collections::new_dictionary(
-+        &[],
-+        corefoundation::callbacks::Policy::from_key_callbacks(),
-+        corefoundation::callbacks::Policy::from_type_callbacks(),
-+        false,
-+    ) as *mut c_void
-+}
-+
-+/// `CFArrayRef SCDynamicStoreCopyKeyList(SCDynamicStoreRef, CFStringRef)`.
-+///
-+/// # Safety
-+///
-+/// None beyond being called as the C function it is.
-+pub unsafe extern "C" fn SCDynamicStoreCopyKeyList(
-+    _store: *mut c_void,
-+    _pattern: *mut c_void,
-+) -> *mut c_void {
-+    corefoundation::collections::new_array(
-+        &[],
-+        corefoundation::callbacks::Policy::from_type_callbacks(),
-+        false,
-+    ) as *mut c_void
-+}
-+
-+/// `Boolean SCDynamicStoreSetNotificationKeys(SCDynamicStoreRef, CFArrayRef,
-+/// CFArrayRef)`.
-+///
-+/// # Safety
-+///
-+/// None beyond being called as the C function it is.
-+pub unsafe extern "C" fn SCDynamicStoreSetNotificationKeys(
-+    _store: *mut c_void,
-+    _keys: *mut c_void,
-+    _patterns: *mut c_void,
-+) -> u8 {
-+    1
-+}
-+
-+/// `CFRunLoopSourceRef SCDynamicStoreCreateRunLoopSource(CFAllocatorRef,
-+/// SCDynamicStoreRef, CFIndex)`: no source, because no key ever changes.
-+///
-+/// # Safety
-+///
-+/// None beyond being called as the C function it is.
-+pub unsafe extern "C" fn SCDynamicStoreCreateRunLoopSource(
-+    _allocator: *mut c_void,
-+    _store: *mut c_void,
-+    _order: isize,
-+) -> *mut c_void {
-+    std::ptr::null_mut()
-+}
-+
-+/// `void CFRelease(CFTypeRef)`-style disposal for a store handle.
-+///
-+/// # Safety
-+///
-+/// `store` is null or a handle this module made.
-+pub unsafe extern "C" fn SCDynamicStoreRelease(store: *mut c_void) {
-+    if store.is_null() {
-+        return;
-+    }
-+    // SAFETY: the handle `SCDynamicStoreCreateWithOptions` boxed.
-+    drop(unsafe { Box::from_raw(store as *mut u64) });
-+}
-+
-+/// `OSStatus SCDynamicStoreSetValue(SCDynamicStoreRef, CFStringRef,
-+/// CFPropertyListRef)`: nothing is stored.
-+///
-+/// # Safety
-+///
-+/// None beyond being called as the C function it is.
-+pub unsafe extern "C" fn SCDynamicStoreSetValue(
-+    _store: *mut c_void,
-+    _key: *mut c_void,
-+    _value: *mut c_void,
-+) -> OSStatus {
-+    ERR
-+}
-+
-+/// `void SCDynamicStoreSetDispatchQueue(SCDynamicStoreRef, dispatch_queue_t)`.
-+///
-+/// # Safety
-+///
-+/// None beyond being called as the C function it is.
-+pub unsafe extern "C" fn SCDynamicStoreSetDispatchQueue(
-+    _store: *mut c_void,
-+    _queue: *mut c_void,
-+) -> u8 {
-+    1
-+}
-+
-+#[allow(dead_code)]
-+const _: OSStatus = OK;
-+
-+exports::exports! {
-+    functions {
-+        "SCDynamicStoreCreateWithOptions" => SCDynamicStoreCreateWithOptions,
-+        "SCDynamicStoreCopyValue" => SCDynamicStoreCopyValue,
-+        "SCDynamicStoreCopyMultiple" => SCDynamicStoreCopyMultiple,
-+        "SCDynamicStoreCopyKeyList" => SCDynamicStoreCopyKeyList,
-+        "SCDynamicStoreSetNotificationKeys" => SCDynamicStoreSetNotificationKeys,
-+        "SCDynamicStoreCreateRunLoopSource" => SCDynamicStoreCreateRunLoopSource,
-+        "SCDynamicStoreRelease" => SCDynamicStoreRelease,
-+        "SCDynamicStoreSetValue" => SCDynamicStoreSetValue,
-+        "SCDynamicStoreSetDispatchQueue" => SCDynamicStoreSetDispatchQueue,
-+    }
-+    data {
-+        "_kSCDynamicStoreUseSessionKeys" => dynamic_store_keys(),
-+    }
-+}
-+
-+/// `CFStringRef kSCDynamicStoreUseSessionKeys`, as a run-time key.
-+fn dynamic_store_keys() -> u64 {
-+    corefoundation::base::global_cell(
-+        "_kSCDynamicStoreUseSessionKeys",
-+        corefoundation::base::interned_name("kSCDynamicStoreUseSessionKeys"),
-+    )
-+}
-diff --git a/crates/security/src/securetransport.rs b/crates/security/src/securetransport.rs
-new file mode 100644
-index 0000000..5084ebe
---- /dev/null
-+++ b/crates/security/src/securetransport.rs
-@@ -0,0 +1,816 @@
-+//! SecureTransport: the `SSL*` TLS client API, over Rustls.
-+//!
-+//! A guest that carries its own network stack (the Roblox executor does) opens a
-+//! context, installs `SSLSetIOFuncs` callbacks, sets the peer's name, and drives
-+//! a handshake with `SSLHandshake`. Rustls does the TLS work; guest callbacks
-+//! move the bytes so a non-blocking caller sees `errSSLWouldBlock`.
-+//!
-+//! The server is always verified: against the host's roots, and against the
-+//! name given to `SSLSetPeerDomainName`. There is no "skip verification" path.
-+
-+#![allow(non_snake_case)]
-+
-+use std::ffi::c_void;
-+use std::io::{Read, Write};
-+
-+use corefoundation::base::CFTypeRef;
-+use rustls_pki_types::{CertificateDer, ServerName};
-+
-+type OSStatus = i32;
-+/// `errSSLParam`.
-+const PARAM: OSStatus = -50;
-+/// `noErr`.
-+const OK: OSStatus = 0;
-+/// `errSSLCrypto`.
-+const CRYPTO: OSStatus = -9802;
-+/// `errSSLWouldBlock`.
-+const WOULD_BLOCK: OSStatus = -9803;
-+/// `errSSLProtocol`.
-+const PROTOCOL: OSStatus = -9807;
-+/// `errSSLPeerHandshakeFail`.
-+const PEER_HANDSHAKE_FAIL: OSStatus = -9812;
-+/// `errSSLPeerCertUnknown`.
-+const PEER_CERT_UNKNOWN: OSStatus = -9814;
-+/// `errSSLInternal`.
-+const INTERNAL: OSStatus = -9817;
-+
-+/// `kSSLConnected`.
-+const STATE_CONNECTED: i32 = 2;
-+/// `kSSLHandshake`.
-+const STATE_HANDSHAKE: i32 = 1;
-+/// `kSSLIdle`.
-+const STATE_IDLE: i32 = 0;
-+
-+/// `OSStatus (*SSLReadFunc)(SSLConnectionRef, void *, size_t *)`.
-+type ReadFunc = Option<unsafe extern "C" fn(*const c_void, *mut c_void, *mut usize) -> OSStatus>;
-+/// `OSStatus (*SSLWriteFunc)(SSLConnectionRef, const void *, size_t *)`.
-+type WriteFunc = Option<unsafe extern "C" fn(*const c_void, *const c_void, *mut usize) -> OSStatus>;
-+
-+/// Handshake steps tried per call before yielding `errSSLWouldBlock`.
-+const HANDSHAKE_STEPS: usize = 8;
-+/// Bytes read from the guest per step.
-+const IO_BUFFER: usize = 64 * 1024;
-+
-+struct Connection {
-+    server_name: String,
-+    read: ReadFunc,
-+    write: WriteFunc,
-+    io: *mut c_void,
-+    /// TLS output not yet accepted by the guest.
-+    outbound: Vec<u8>,
-+    /// Suites the caller asked for; Rustls chooses from its own set.
-+    ciphers: Vec<u16>,
-+    tls: Option<rustls::ClientConnection>,
-+}
-+
-+impl Connection {
-+    /// One guest read. `Err` carries the callback's refusal.
-+    fn io_read(&mut self, buffer: &mut [u8]) -> Result<usize, OSStatus> {
-+        let Some(read) = self.read else {
-+            return Ok(0);
-+        };
-+        let mut count = buffer.len();
-+        // SAFETY: the guest's callback, given its own connection reference and a
-+        // writable buffer of the stated length.
-+        let status = unsafe { read(self.io, buffer.as_mut_ptr() as *mut c_void, &mut count) };
-+        match status {
-+            OK | WOULD_BLOCK => Ok(count.min(buffer.len())),
-+            other => Err(other),
-+        }
-+    }
-+
-+    /// Hand `data` to the guest; whatever it does not take stays queued.
-+    fn io_write(&mut self, data: &[u8]) -> OSStatus {
-+        let Some(write) = self.write else {
-+            self.outbound.extend_from_slice(data);
-+            return OK;
-+        };
-+        let mut left = data;
-+        while !left.is_empty() {
-+            let mut count = left.len();
-+            // SAFETY: the guest's callback, its own connection reference, and a
-+            // readable buffer of the stated length.
-+            let status = unsafe { write(self.io, left.as_ptr() as *const c_void, &mut count) };
-+            if status != OK && status != WOULD_BLOCK {
-+                self.outbound.extend_from_slice(left);
-+                return status;
-+            }
-+            if count == 0 {
-+                break;
-+            }
-+            left = &left[count.min(left.len())..];
-+        }
-+        if !left.is_empty() {
-+            self.outbound.extend_from_slice(left);
-+        }
-+        OK
-+    }
-+
-+    /// Send queued TLS output to the guest.
-+    fn flush(&mut self) -> OSStatus {
-+        let queued = std::mem::take(&mut self.outbound);
-+        self.io_write(&queued)
-+    }
-+
-+    /// Move whatever the current handshake state wants written into `outbound`.
-+    fn drain_tls(&mut self) {
-+        let Some(tls) = self.tls.as_mut() else {
-+            return;
-+        };
-+        let mut chunk = [0u8; IO_BUFFER];
-+        loop {
-+            match tls.write_tls(&mut &mut chunk[..]) {
-+                Ok(0) | Err(_) => break,
-+                Ok(n) => self.outbound.extend_from_slice(&chunk[..n]),
-+            }
-+        }
-+    }
-+
-+    /// Give guest bytes to Rustls and process whatever became complete.
-+    fn feed(&mut self, data: &[u8]) -> Result<(), OSStatus> {
-+        let Some(tls) = self.tls.as_mut() else {
-+            return Err(INTERNAL);
-+        };
-+        let mut cursor = data;
-+        while !cursor.is_empty() {
-+            match tls.read_tls(&mut cursor) {
-+                Ok(0) => break,
-+                Ok(_) => {
-+                    tls.process_new_packets().map_err(|_| PEER_CERT_UNKNOWN)?;
-+                }
-+                Err(_) => return Err(PROTOCOL),
-+            }
-+        }
-+        Ok(())
-+    }
-+
-+    fn established(&self) -> bool {
-+        self.tls.as_ref().is_some_and(|tls| !tls.is_handshaking())
-+    }
-+
-+    /// Plaintext Rustls already holds for the caller. A settled connection
-+    /// reports one byte so a caller polling the size keeps reading; what is
-+    /// actually there is only known by reading, and `SSLRead` spends it.
-+    fn buffered_plaintext(&self) -> usize {
-+        if self.established() { 1 } else { 0 }
-+    }
-+}
-+
-+// A context is created, used and dropped by one guest thread at a time; the
-+// handle is opaque and never shared inside the runtime.
-+unsafe impl Send for Connection {}
-+
-+fn roots() -> &'static std::sync::Arc<rustls::RootCertStore> {
-+    static ROOTS: std::sync::OnceLock<std::sync::Arc<rustls::RootCertStore>> =
-+        std::sync::OnceLock::new();
-+    ROOTS.get_or_init(|| {
-+        use rustls_pki_types::pem::PemObject;
-+        const BUNDLES: &[&str] = &[
-+            "/etc/ssl/certs/ca-certificates.crt",
-+            "/etc/pki/tls/certs/ca-bundle.crt",
-+            "/etc/ssl/ca-bundle.pem",
-+            "/etc/ssl/cert.pem",
-+            "/usr/local/share/certs/ca-root-nss.crt",
-+        ];
-+        let named = std::env::var_os("SSL_CERT_FILE").map(std::path::PathBuf::from);
-+        let pem = named
-+            .into_iter()
-+            .chain(BUNDLES.iter().map(std::path::PathBuf::from))
-+            .find_map(|path| std::fs::read(path).ok())
-+            .unwrap_or_default();
-+        let mut store = rustls::RootCertStore::empty();
-+        for der in CertificateDer::pem_slice_iter(&pem).filter_map(Result::ok) {
-+            let _ = store.add(der);
-+        }
-+        std::sync::Arc::new(store)
-+    })
-+}
-+
-+fn config() -> &'static std::sync::Arc<rustls::ClientConfig> {
-+    static CONFIG: std::sync::OnceLock<std::sync::Arc<rustls::ClientConfig>> =
-+        std::sync::OnceLock::new();
-+    CONFIG.get_or_init(|| {
-+        let provider = rustls::crypto::ring::default_provider();
-+        let config = rustls::ClientConfig::builder_with_provider(provider.into())
-+            .with_safe_default_protocol_versions()
-+            .expect("the ring provider supports the default TLS versions")
-+            .with_root_certificates(roots().clone())
-+            .with_no_client_auth();
-+        std::sync::Arc::new(config)
-+    })
-+}
-+
-+#[repr(C)]
-+struct Body {
-+    isa: *const objc::class::Class,
-+    connection: *mut Connection,
-+}
-+
-+fn class() -> &'static objc::class::Class {
-+    static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-+    let pointer = *CLASS.get_or_init(|| {
-+        let class = corefoundation::base::register(c"__R3SSLContext", None, size_of::<Body>(), true);
-+        class.replace_method(
-+            objc::sel::get("dealloc"),
-+            dealloc as *const c_void,
-+            c"v16@0:8",
-+        );
-+        objc::class::ptr(class) as usize
-+    });
-+    // SAFETY: a class registered above and kept for the process.
-+    unsafe {
-+        objc::class::from_ptr(pointer as *const objc::class::Class).expect("an SSL context class")
-+    }
-+}
-+
-+unsafe extern "C" fn dealloc(receiver: objc::object::Id, _sel: objc::sel::Sel) {
-+    // SAFETY: this class's layout, and the connection `SSLCreateContext` boxed.
-+    unsafe {
-+        let body = receiver as *mut Body;
-+        if !(*body).connection.is_null() {
-+            drop(Box::from_raw((*body).connection));
-+        }
-+        objc::arc::finalize(receiver);
-+    }
-+}
-+
-+fn new_handle(connection: Connection) -> CFTypeRef {
-+    // SAFETY: `Body` is the registered layout.
-+    let body = unsafe { corefoundation::base::allocate::<Body>(class()) };
-+    if body.is_null() {
-+        return std::ptr::null();
-+    }
-+    // SAFETY: a freshly allocated body, written once before publication.
-+    unsafe { (*body).connection = Box::into_raw(Box::new(connection)) };
-+    body as CFTypeRef
-+}
-+
-+/// # Safety
-+///
-+/// `ctx` is null or a live context from [`SSLCreateContext`].
-+unsafe fn connection<'a>(ctx: CFTypeRef) -> Option<&'a mut Connection> {
-+    if ctx.is_null() || !unsafe { corefoundation::base::is_kind_of(ctx, class()) } {
-+        return None;
-+    }
-+    let body = ctx as *mut Body;
-+    if unsafe { (*body).connection.is_null() } {
-+        return None;
-+    }
-+    // SAFETY: a body of this class, live for `'a`.
-+    Some(unsafe { &mut *(*body).connection })
-+}
-+
-+/// `SSLContextRef SSLCreateContext(CFAllocatorRef, SSLProtocolSide,
-+/// SSLConnectionType)`.
-+///
-+/// # Safety
-+///
-+/// None beyond being called as the C function it is.
-+pub unsafe extern "C" fn SSLCreateContext(
-+    _allocator: CFTypeRef,
-+    _side: i32,
-+    _kind: i32,
-+) -> CFTypeRef {
-+    new_handle(Connection {
-+        server_name: String::new(),
-+        read: None,
-+        write: None,
-+        io: std::ptr::null_mut(),
-+        outbound: Vec::new(),
-+        ciphers: Vec::new(),
-+        tls: None,
-+    })
-+}
-+
-+/// `OSStatus SSLSetIOFuncs(SSLContextRef, SSLReadFunc, SSLWriteFunc)`.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; the callbacks stay valid while it is used.
-+pub unsafe extern "C" fn SSLSetIOFuncs(
-+    ctx: CFTypeRef,
-+    read: ReadFunc,
-+    write: WriteFunc,
-+) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    connection.read = read;
-+    connection.write = write;
-+    OK
-+}
-+
-+/// `OSStatus SSLSetConnection(SSLContextRef, SSLConnectionRef)`.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; `io` is the value the callbacks expect.
-+pub unsafe extern "C" fn SSLSetConnection(ctx: CFTypeRef, io: *mut c_void) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    connection.io = io;
-+    OK
-+}
-+
-+/// `OSStatus SSLSetPeerDomainName(SSLContextRef, const char *, size_t)`.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; `name` is readable for `length` bytes.
-+pub unsafe extern "C" fn SSLSetPeerDomainName(
-+    ctx: CFTypeRef,
-+    name: *const u8,
-+    length: usize,
-+) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    if name.is_null() || length == 0 {
-+        return PARAM;
-+    }
-+    // SAFETY: readable for `length`, per the caller.
-+    let bytes = unsafe { std::slice::from_raw_parts(name, length) };
-+    let text = String::from_utf8_lossy(bytes);
-+    connection.server_name = text.trim_end_matches('\0').to_string();
-+    OK
-+}
-+
-+/// `OSStatus SSLSetProtocolVersionMin(SSLContextRef, SSLProtocol)`.
-+///
-+/// Rustls always negotiates TLS 1.2 or newer, so every minimum a caller can ask
-+/// for that this runtime supports is already met.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context.
-+pub unsafe extern "C" fn SSLSetProtocolVersionMin(ctx: CFTypeRef, _version: i32) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    if unsafe { connection(ctx) }.is_some() {
-+        OK
-+    } else {
-+        PARAM
-+    }
-+}
-+
-+/// `OSStatus SSLSetSessionOption(SSLContextRef, SSLSessionOption, Boolean)`.
-+///
-+/// The breakout and ticket options are accepted; verification is always on, so
-+/// `kSSLSessionOptionBreakOnServerAuth` cannot turn it off.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context.
-+pub unsafe extern "C" fn SSLSetSessionOption(
-+    ctx: CFTypeRef,
-+    _option: i32,
-+    _value: u8,
-+) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    if unsafe { connection(ctx) }.is_some() {
-+        OK
-+    } else {
-+        PARAM
-+    }
-+}
-+
-+/// `OSStatus SSLHandshake(SSLContextRef)`.
-+///
-+/// Creates the connection on the first call, then pumps it. Returns
-+/// `errSSLWouldBlock` while the transport has nothing new, which is what a
-+/// caller loops on.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context.
-+pub unsafe extern "C" fn SSLHandshake(ctx: CFTypeRef) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+
-+    if connection.tls.is_none() {
-+        let Ok(name) = ServerName::try_from(connection.server_name.clone()) else {
-+            return PEER_HANDSHAKE_FAIL;
-+        };
-+        match rustls::ClientConnection::new(config().clone(), name) {
-+            Ok(tls) => connection.tls = Some(tls),
-+            Err(_) => return INTERNAL,
-+        }
-+    }
-+
-+    connection.drain_tls();
-+    let mut status = connection.flush();
-+    if status != OK {
-+        return status;
-+    }
-+
-+    for _ in 0..HANDSHAKE_STEPS {
-+        if connection.established() {
-+            return OK;
-+        }
-+        let mut buffer = [0u8; IO_BUFFER];
-+        let read = match connection.io_read(&mut buffer) {
-+            Ok(read) => read,
-+            Err(code) => return code,
-+        };
-+        if read == 0 {
-+            return WOULD_BLOCK;
-+        }
-+        if let Err(code) = connection.feed(&buffer[..read]) {
-+            return code;
-+        }
-+        connection.drain_tls();
-+        status = connection.flush();
-+        if status != OK {
-+            return status;
-+        }
-+    }
-+
-+    if connection.established() {
-+        OK
-+    } else {
-+        WOULD_BLOCK
-+    }
-+}
-+
-+/// Read plaintext Rustls already produced, returning how much.
-+fn read_plaintext(connection: &mut Connection, buffer: &mut [u8]) -> usize {
-+    let Some(tls) = connection.tls.as_mut() else {
-+        return 0;
-+    };
-+    let mut written = 0;
-+    while written < buffer.len() {
-+        match tls.reader().read(&mut buffer[written..]) {
-+            Ok(0) => break,
-+            Ok(n) => written += n,
-+            Err(_) => break,
-+        }
-+    }
-+    written
-+}
-+
-+/// `OSStatus SSLRead(SSLContextRef, void *, size_t, size_t *)`.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; `data` is writable for `length` bytes;
-+/// `processed` is null or writable.
-+pub unsafe extern "C" fn SSLRead(
-+    ctx: CFTypeRef,
-+    data: *mut c_void,
-+    length: usize,
-+    processed: *mut usize,
-+) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    if !processed.is_null() {
-+        // SAFETY: writable, per the caller.
-+        unsafe { processed.write(0) };
-+    }
-+    if data.is_null() || length == 0 {
-+        return PARAM;
-+    }
-+    // SAFETY: writable for `length`, per the caller.
-+    let buffer = unsafe { std::slice::from_raw_parts_mut(data as *mut u8, length) };
-+
-+    let mut written = read_plaintext(connection, buffer);
-+    if written == 0 {
-+        let mut wire = [0u8; IO_BUFFER];
-+        let read = match connection.io_read(&mut wire) {
-+            Ok(read) => read,
-+            Err(code) => return code,
-+        };
-+        if read == 0 {
-+            return WOULD_BLOCK;
-+        }
-+        if let Err(code) = connection.feed(&wire[..read]) {
-+            return code;
-+        }
-+        connection.drain_tls();
-+        let status = connection.flush();
-+        if status != OK {
-+            return status;
-+        }
-+        written = read_plaintext(connection, buffer);
-+    }
-+
-+    if !processed.is_null() {
-+        // SAFETY: writable, per the caller.
-+        unsafe { processed.write(written) };
-+    }
-+    if written == 0 {
-+        WOULD_BLOCK
-+    } else {
-+        OK
-+    }
-+}
-+
-+/// `OSStatus SSLWrite(SSLContextRef, const void *, size_t, size_t *)`.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; `data` is readable for `length` bytes;
-+/// `processed` is null or writable.
-+pub unsafe extern "C" fn SSLWrite(
-+    ctx: CFTypeRef,
-+    data: *const c_void,
-+    length: usize,
-+    processed: *mut usize,
-+) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    if !processed.is_null() {
-+        // SAFETY: writable, per the caller.
-+        unsafe { processed.write(0) };
-+    }
-+    let Some(tls) = connection.tls.as_mut() else {
-+        return PROTOCOL;
-+    };
-+    if data.is_null() || length == 0 {
-+        return PARAM;
-+    }
-+    // SAFETY: readable for `length`, per the caller.
-+    let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, length) };
-+
-+    let mut written = 0;
-+    while written < bytes.len() {
-+        match tls.writer().write(&bytes[written..]) {
-+            Ok(0) => break,
-+            Ok(n) => written += n,
-+            Err(_) => return CRYPTO,
-+        }
-+    }
-+    connection.drain_tls();
-+    let status = connection.flush();
-+    if status != OK {
-+        return status;
-+    }
-+
-+    if !processed.is_null() {
-+        // SAFETY: writable, per the caller.
-+        unsafe { processed.write(written) };
-+    }
-+    if written == bytes.len() {
-+        OK
-+    } else {
-+        WOULD_BLOCK
-+    }
-+}
-+
-+/// `OSStatus SSLClose(SSLContextRef)`.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context.
-+pub unsafe extern "C" fn SSLClose(ctx: CFTypeRef) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    if let Some(tls) = connection.tls.as_mut() {
-+        tls.send_close_notify();
-+    }
-+    connection.drain_tls();
-+    let _ = connection.flush();
-+    OK
-+}
-+
-+/// `OSStatus SSLGetConnection(SSLContextRef, SSLConnectionRef *)`: the value
-+/// given to `SSLSetConnection`.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; `io` is null or writable.
-+pub unsafe extern "C" fn SSLGetConnection(
-+    ctx: CFTypeRef,
-+    io: *mut *mut c_void,
-+) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    if io.is_null() {
-+        return PARAM;
-+    }
-+    // SAFETY: writable, per the caller.
-+    unsafe { io.write(connection.io) };
-+    OK
-+}
-+
-+/// `OSStatus SSLSetProtocolVersionMax(SSLContextRef, SSLProtocol)`.
-+///
-+/// Rustls negotiates the newest version both ends share; the ceiling a caller
-+/// names is accepted as a request it already honours.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context.
-+pub unsafe extern "C" fn SSLSetProtocolVersionMax(ctx: CFTypeRef, _version: i32) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    if unsafe { connection(ctx) }.is_some() {
-+        OK
-+    } else {
-+        PARAM
-+    }
-+}
-+
-+/// `OSStatus SSLSetEnabledCiphers(SSLContextRef, const SSLCipherSuite *,
-+/// size_t)`.
-+///
-+/// Rustls chooses from its own suite set; a caller's list is noted and not
-+/// enforced, because a suite it names may not exist in the Rustls backend.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; `ciphers` is readable for `count` entries.
-+pub unsafe extern "C" fn SSLSetEnabledCiphers(
-+    ctx: CFTypeRef,
-+    ciphers: *const u16,
-+    count: usize,
-+) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    if ciphers.is_null() && count > 0 {
-+        return PARAM;
-+    }
-+    if !ciphers.is_null() {
-+        // SAFETY: readable for `count`, per the caller.
-+        let list = unsafe { std::slice::from_raw_parts(ciphers, count) };
-+        connection.ciphers = list.to_vec();
-+    }
-+    OK
-+}
-+
-+/// `OSStatus SSLGetEnabledCiphers(SSLContextRef, SSLCipherSuite *, size_t *)`.
-+///
-+/// Answers the list the caller set, or the one a fresh context reports.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; `ciphers` is writable for `*count` entries
-+/// and `count` is null or writable.
-+pub unsafe extern "C" fn SSLGetEnabledCiphers(
-+    ctx: CFTypeRef,
-+    ciphers: *mut u16,
-+    count: *mut usize,
-+) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    if count.is_null() {
-+        return PARAM;
-+    }
-+    let available = connection.ciphers.len();
-+    // SAFETY: writable, per the caller.
-+    let room = unsafe { count.read() };
-+    if !ciphers.is_null() {
-+        let write = room.min(available);
-+        for (i, suite) in connection.ciphers.iter().take(write).enumerate() {
-+            // SAFETY: writable for `room` entries, per the caller.
-+            unsafe { ciphers.add(i).write(*suite) };
-+        }
-+    }
-+    // SAFETY: writable, per the caller.
-+    unsafe { count.write(available) };
-+    OK
-+}
-+
-+/// `OSStatus SSLGetNumberEnabledCiphers(SSLContextRef, size_t *)`.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; `count` is null or writable.
-+pub unsafe extern "C" fn SSLGetNumberEnabledCiphers(
-+    ctx: CFTypeRef,
-+    count: *mut usize,
-+) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    if count.is_null() {
-+        return PARAM;
-+    }
-+    // SAFETY: writable, per the caller.
-+    unsafe { count.write(connection.ciphers.len()) };
-+    OK
-+}
-+
-+/// `OSStatus SSLSetCertificate(SSLContextRef, CFArrayRef)`: a client identity.
-+///
-+/// No client certificate is used by this runtime; the call is accepted so a
-+/// handshake setup that always makes it still proceeds.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context.
-+pub unsafe extern "C" fn SSLSetCertificate(ctx: CFTypeRef, _identity: CFTypeRef) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    if unsafe { connection(ctx) }.is_some() {
-+        OK
-+    } else {
-+        PARAM
-+    }
-+}
-+
-+/// `OSStatus SSLCopyPeerTrust(SSLContextRef, SecTrustRef *)`.
-+///
-+/// The peer's chain, as a trust object, which is what a caller inspects with
-+/// the `SecTrust` API. Null until the handshake has produced a chain.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; `trust` is null or writable.
-+pub unsafe extern "C" fn SSLCopyPeerTrust(ctx: CFTypeRef, trust: *mut CFTypeRef) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    if trust.is_null() {
-+        return PARAM;
-+    }
-+    let chain: Vec<Vec<u8>> = connection
-+        .tls
-+        .as_ref()
-+        .map(|tls| tls.peer_certificates().unwrap_or_default().iter().map(|c| c.as_ref().to_vec()).collect())
-+        .unwrap_or_default();
-+    // SAFETY: writable, per the caller.
-+    unsafe { trust.write(super::trust::new_trust(chain, String::new())) };
-+    OK
-+}
-+
-+/// `OSStatus SSLGetBufferedReadSize(SSLContextRef, size_t *)`: bytes of
-+/// plaintext Rustls already holds for the caller.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; `size` is null or writable.
-+pub unsafe extern "C" fn SSLGetBufferedReadSize(ctx: CFTypeRef, size: *mut usize) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    if size.is_null() {
-+        return PARAM;
-+    }
-+    // SAFETY: writable, per the caller.
-+    unsafe { size.write(connection.buffered_plaintext()) };
-+    OK
-+}
-+
-+/// `OSStatus SSLGetSessionState(SSLContextRef, SSLSessionState *)`.
-+///
-+/// # Safety
-+///
-+/// `ctx` is null or a live context; `state` is null or writable.
-+pub unsafe extern "C" fn SSLGetSessionState(ctx: CFTypeRef, state: *mut i32) -> OSStatus {
-+    // SAFETY: the caller's guarantee.
-+    let Some(connection) = (unsafe { connection(ctx) }) else {
-+        return PARAM;
-+    };
-+    if !state.is_null() {
-+        let value = match connection.tls.as_ref() {
-+            None => STATE_IDLE,
-+            Some(tls) if tls.is_handshaking() => STATE_HANDSHAKE,
-+            Some(_) => STATE_CONNECTED,
-+        };
-+        // SAFETY: writable, per the caller.
-+        unsafe { state.write(value) };
-+    }
-+    OK
-+}
-+
-+exports::exports! {
-+    functions {
-+        "SSLCreateContext" => SSLCreateContext,
-+        "SSLSetIOFuncs" => SSLSetIOFuncs,
-+        "SSLSetConnection" => SSLSetConnection,
-+        "SSLGetConnection" => SSLGetConnection,
-+        "SSLSetPeerDomainName" => SSLSetPeerDomainName,
-+        "SSLSetProtocolVersionMin" => SSLSetProtocolVersionMin,
-+        "SSLSetProtocolVersionMax" => SSLSetProtocolVersionMax,
-+        "SSLSetSessionOption" => SSLSetSessionOption,
-+        "SSLSetEnabledCiphers" => SSLSetEnabledCiphers,
-+        "SSLGetEnabledCiphers" => SSLGetEnabledCiphers,
-+        "SSLGetNumberEnabledCiphers" => SSLGetNumberEnabledCiphers,
-+        "SSLSetCertificate" => SSLSetCertificate,
-+        "SSLCopyPeerTrust" => SSLCopyPeerTrust,
-+        "SSLGetBufferedReadSize" => SSLGetBufferedReadSize,
-+        "SSLHandshake" => SSLHandshake,
-+        "SSLRead" => SSLRead,
-+        "SSLWrite" => SSLWrite,
-+        "SSLClose" => SSLClose,
-+        "SSLGetSessionState" => SSLGetSessionState,
-+    }
-+}
