@@ -1,5 +1,6 @@
-# Nix build output
+# Nix build output (result symlink or directory)
 /result
+result/
 
 # Installer scratch/logs
 /.tmp.*
