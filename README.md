@@ -212,7 +212,7 @@ terms; they are not redistributed here.
 
 ## Credits
 
-- **Opiumware** — original macOS executor by [@norbyv1](https://github.com/norbyv1)
+- **Opiumware** — original macOS executor by [@norbyv1](https://gitlab.com/norbyv1)
 - **[Rosemary](https://github.com/microlift/rosemary)** — macOS compatibility
   layer and x86-64 emulator by the Microlift project (GPL-3.0)
 - **[MiniDarwin](https://github.com/V3L0C1T13S/minidarwin)** — Darwin base used by
