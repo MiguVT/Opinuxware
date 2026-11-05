@@ -186,7 +186,15 @@ faults that looked like unwinder problems but were not:
 The real `__try`/`__catch` gap was `___objc_personality_v0`'s slot: an image
 that links no C++ runtime (the UI does not link libc++) imports the name as
 data, and `publish_personality` recorded the routine but never wrote the slot.
-The UI's import list is now fully resolved (0 unbound), and the executor still
+The UI's import list is now fully resolved (0 unbound).
+
+One further fix made the UI fully usable: Tauri's IPC scope check classifies a
+command's origin as local by comparing the webview's URL with the app's
+configured `tauri://localhost`, but this runtime serves the frontend from
+`file://<bundle>/Contents/Resources/_up_/` (WebKitGTK refuses custom schemes),
+so every command was rejected with "Scope not defined". `-URL` now reports the
+scheme URL (`tauri://localhost/...`) for pages under a bundle's `_up_` asset
+directory, so the editor, console and file operations work. The executor still
 runs 60 s with zero import faults.
 
 Stubbing certificate verification was not done: the SecureTransport shim

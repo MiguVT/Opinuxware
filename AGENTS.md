@@ -276,8 +276,10 @@ What the patch adds, roughly:
 6. The Opiumware UI's own needs: `dictionary_enumerate` returning the mutation
    guard on empty answers, `-[NSHTTPURLResponse initWithURL:statusCode:HTTPVersion:headerFields:]`
    plus `corefoundation::boxed::place_contents`, `isMovableByWindowBackground`,
-   and `publish_personality` writing every `___objc_personality_v0` slot so
-   C++-less images resolve the last import and can unwind into a `@catch`.
+   `publish_personality` writing every `___objc_personality_v0` slot so
+   C++-less images resolve the last import and can unwind into a `@catch`, and
+   `WKWebView -URL` reporting the `tauri://` scheme for pages served from a
+   bundle's `_up_` directory so Tauri's IPC scope accepts the window.
 
 ## Opiumware UI: works; how it got here, and what to test on a change
 
@@ -311,6 +313,18 @@ a **null dereference of `state.mutations`**, not an unwinder/`@catch` problem:
    exceptions table would have jumped to zero. `publish_personality` now writes
    every `___objc_personality_v0` slot, like `publish_root_record` does for
    `_OBJC_EHTYPE_id`.
+5. The Tauri IPC scope: Tauri's `Window::on_message` classifies the command
+   origin as local only when `webview.url()` shares the scheme, host and port
+   of the app's configured URL (`tauri://localhost`). This runtime serves the
+   frontend from `file://<bundle>/Contents/Resources/_up_/<host>/<path>`
+   (`servable_base`, because WebKitGTK has no handler for custom schemes), so
+   `-URL` reported a `file:` URL and **every** command was rejected with
+   "Scope not defined for window `main` and URL …". Fix: `-URL` inverts the
+   mapping for pages under a bundle's `_up_` directory and reports
+   `tauri://<host>/<path>`, bundle detected from the URL itself (this process
+   is Rosemary, in the nix store, so `bare_guest_executable` is not usable
+   here). WebKitGTK still resolves the relative assets against the real
+   `file:` base, so both the document origin and the load path are right.
 
 Findings that still matter:
 

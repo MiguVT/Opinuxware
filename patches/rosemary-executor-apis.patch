@@ -3122,7 +3122,7 @@ index bf8b1f5..5cbaf6b 100644
  
          let preferences = corefoundation::base::abstract_class(c"WebPreferences", None);
 diff --git a/crates/webkit/src/web_view.rs b/crates/webkit/src/web_view.rs
-index f2d680e..dfc6404 100644
+index f2d680e..03fa30b 100644
 --- a/crates/webkit/src/web_view.rs
 +++ b/crates/webkit/src/web_view.rs
 @@ -1477,6 +1477,10 @@ unsafe extern "C" fn load_request(receiver: Id, _sel: Sel, request: Id) -> Id {
@@ -3346,7 +3346,18 @@ index f2d680e..dfc6404 100644
  unsafe extern "C" fn can_go_back(receiver: Id, _sel: Sel) -> u8 {
      // SAFETY: the view's widget.
      gtk_of(receiver)
-@@ -1925,12 +2125,95 @@ unsafe extern "C" fn redo(receiver: Id, _sel: Sel, _sender: Id) {
+@@ -1557,7 +1757,9 @@ unsafe extern "C" fn url(receiver: Id, _sel: Sel) -> Id {
+     if text.is_empty() {
+         return std::ptr::null_mut();
+     }
+-    objc::arc::autorelease(corefoundation::url::new(&guest_url(&text)) as Id)
++    let text = guest_url(&text);
++    let text = logical_url_of(&text).unwrap_or(text);
++    objc::arc::autorelease(corefoundation::url::new(&text) as Id)
+ }
+ 
+ /// A JavaScript value as the Objective-C object WebKit bridges it to.
+@@ -1925,12 +2127,127 @@ unsafe extern "C" fn redo(receiver: Id, _sel: Sel, _sender: Id) {
      editing(receiver, c"Redo");
  }
  
@@ -3394,6 +3405,38 @@ index f2d680e..dfc6404 100644
 +    // Names are `.../Foo.app/Contents/MacOS/Foo`.
 +    let bundle = guest.split("/Contents/MacOS/").next()?;
 +    bundle.ends_with(".app").then(|| bundle.to_string())
++}
++
++/// The custom-scheme URL a page under a bundle's asset directory answers to.
++///
++/// [`servable_base`] loads the guest's custom-scheme pages (`tauri://...`) as
++/// `file:` URLs under `<bundle>/Contents/Resources/_up_/` because WebKitGTK
++/// refuses schemes it has no handler for. The guest, though, must see the page
++/// as the one it asked for: Tauri's IPC scope check classifies a window's URL
++/// as local by comparing it with the app's configured URL, so a page that
++/// reports the `file:` base (whose host cannot be `localhost`) has every
++/// command rejected with "Scope not defined". This inverts the mapping for
++/// exactly the pages `servable_base` produced: the first path component after
++/// `_up_/` is the scheme's host, the rest - if any - is the scheme's path.
++///
++/// The bundle is taken from the URL itself rather than the running
++/// executable's path, because this process is Rosemary itself and lives in the
++/// nix store, outside any prefix mount.
++fn logical_url_of(guest_file: &str) -> Option<String> {
++    const ASSETS: &str = "/Contents/Resources/_up_/";
++    let at = guest_file.find(ASSETS)?;
++    let rest = guest_file[at + ASSETS.len()..].trim_end_matches('/');
++    let (host, path) = match rest.find('/') {
++        None => (rest, ""),
++        Some(at) => (&rest[..at], &rest[at..]),
++    };
++    match host.is_empty() {
++        true => None,
++        false => Some(match path.is_empty() {
++            true => format!("tauri://{host}"),
++            false => format!("tauri://{host}{path}"),
++        }),
++    }
 +}
 +
 +unsafe extern "C" fn load_html_string(receiver: Id, _sel: Sel, html: Id, base: Id) -> Id {
